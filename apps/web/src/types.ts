@@ -1,4 +1,6 @@
-export type ExerciseName = "深蹲" | "卧推" | "硬拉" | "高抓" | "高翻";
+export type ExerciseName = string;
+
+export type TrainingType = "下肢力量" | "上肢力量" | "全身力量" | "举重技术" | "速度力量" | "增强式" | "体能" | "测试" | "恢复" | "其他";
 
 export interface SetEntry {
   id: string;
@@ -18,7 +20,7 @@ export interface ExerciseBlock {
 export interface TrainingSession {
   id?: number;
   date: string;
-  type: "下肢力量" | "上肢力量" | "举重技术" | "测试" | "恢复";
+  type: TrainingType;
   duration: number;
   notes: string;
   exercises: ExerciseBlock[];
@@ -35,6 +37,11 @@ export interface ReadinessEntry {
   stress: number;
   hrv: number;
   restingHr: number;
+  armSwingCmj?: number;
+  noArmCmj?: number;
+  gripLeft?: number;
+  gripRight?: number;
+  healthSource?: "manual" | "apple-health";
   score: number;
   recommendation: string;
 }
@@ -45,7 +52,5 @@ export interface AthleteSettings {
   bodyWeight: number;
   unit: "kg" | "lb";
   theme: "light" | "dark" | "system";
-  mvt: Record<ExerciseName, number>;
+  mvt: Record<string, number>;
 }
-
-export const exercises: ExerciseName[] = ["深蹲", "卧推", "硬拉", "高抓", "高翻"];

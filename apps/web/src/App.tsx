@@ -3,8 +3,8 @@ import { useLiveQuery } from "dexie-react-hooks";
 import {
   Activity, BatteryCharging, CalendarDays, ChevronRight, CircleGauge, Cloud,
   ClipboardCheck, CloudOff, Database, Download, Dumbbell, FileUp, Flame, Gauge,
-  HeartPulse, History, Home, Menu, Moon, MoreHorizontal, Plus, RefreshCw,
-  Save, Sparkles, Target, Trash2, TrendingUp, Trophy, User, X, Zap, LogOut
+  HeartPulse, History, Home, Info, Menu, Moon, MoreHorizontal, Plus, RefreshCw,
+  Save, Smartphone, Sparkles, Target, Trash2, TrendingUp, Trophy, User, X, Zap, LogOut
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine,
@@ -13,8 +13,9 @@ import {
 import { format, parseISO } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { db } from "./db";
-import { linearRegression, readinessRecommendation, readinessScore, sessionVolume, velocityLoss } from "./lib/metrics";
-import { exercises, type AthleteSettings, type ExerciseBlock, type ExerciseName, type ReadinessEntry, type SetEntry, type TrainingSession } from "./types";
+import { linearRegression, performanceReadiness, readinessRecommendation, readinessScore, sessionVolume } from "./lib/metrics";
+import { defaultMvtFor, exerciseGroups, vbtExercises } from "./exerciseCatalog";
+import { type AthleteSettings, type ExerciseBlock, type ExerciseName, type ReadinessEntry, type SetEntry, type TrainingSession, type TrainingType } from "./types";
 import { cacheSnapshot, cloudConfigured, normalizeAccount, pullCloud, pushCloud, readCachedSnapshot, replaceLocal, snapshotLocal, validAccount, type SyncState } from "./sync";
 
 type Page = "dashboard" | "readiness" | "session" | "vbt" | "history" | "data";
@@ -31,6 +32,19 @@ const pageMeta: Record<Page, { label: string; eyebrow: string; icon: typeof Home
 const fmtDate = (date: string) => format(parseISO(date), "M月d日 EEE", { locale: zhCN });
 const today = () => format(new Date(), "yyyy-MM-dd");
 const uid = () => crypto.randomUUID();
+const trainingTypes: TrainingType[] = ["下肢力量", "上肢力量", "全身力量", "举重技术", "速度力量", "增强式", "体能", "测试", "恢复", "其他"];
+
+function ExerciseSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return <select value={value} onChange={(event) => onChange(event.target.value)}>
+    {exerciseGroups.map((group) => <optgroup key={group.category} label={group.category}>
+      {group.exercises.map((exercise) => <option key={`${group.category}-${exercise.name}`} value={exercise.name}>{exercise.name}</option>)}
+    </optgroup>)}
+  </select>;
+}
+
+function exerciseMvt(settings: AthleteSettings | undefined, exercise: string) {
+  return settings?.mvt?.[exercise] ?? defaultMvtFor(exercise);
+}
 
 function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <section className={`card ${className}`}>{children}</section>;
@@ -95,9 +109,11 @@ function LoginScreen({ onLogin, busy, error }: { onLogin: (account: string) => v
 
 function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSession[]; readiness: ReadinessEntry[]; settings?: AthleteSettings; go: (page: Page) => void }) {
   const latest = readiness[0];
-  const lastSession = sessions[0];
+  const lastSession = sessions.find((session) => session.completed);
+  const nextPlan = [...sessions].filter((session) => !session.completed && session.date >= today()).sort((a, b) => a.date.localeCompare(b.date))[0];
   const trend = [...readiness].reverse().slice(-7).map((r) => ({ date: format(parseISO(r.date), "M/d"), score: r.score, hrv: r.hrv }));
-  const weeklyVolume = sessions.filter((s) => (Date.now() - parseISO(s.date).getTime()) / 86400000 < 7).reduce((sum, s) => sum + sessionVolume(s), 0);
+  const weeklySessions = sessions.filter((s) => s.completed && (Date.now() - parseISO(s.date).getTime()) / 86400000 >= 0 && (Date.now() - parseISO(s.date).getTime()) / 86400000 < 7);
+  const weeklyVolume = weeklySessions.reduce((sum, s) => sum + sessionVolume(s), 0);
   const prs = useMemo(() => {
     const best: Partial<Record<ExerciseName, number>> = {};
     sessions.forEach((session) => session.exercises.forEach((block) => block.sets.forEach((set) => {
@@ -114,7 +130,7 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
     <div className="metric-strip">
       <Card><div className="metric-icon lime"><HeartPulse /></div><div><span>HRV</span><strong>{latest?.hrv || "—"}<small> ms</small></strong><em>接近个人基线</em></div></Card>
       <Card><div className="metric-icon blue"><Moon /></div><div><span>睡眠</span><strong>{latest?.sleepHours || "—"}<small> h</small></strong><em>质量 {latest?.sleepQuality || "—"}/5</em></div></Card>
-      <Card><div className="metric-icon amber"><Flame /></div><div><span>7日训练量</span><strong>{Math.round(weeklyVolume / 100) / 10}<small> t</small></strong><em>{sessions.filter((s) => (Date.now() - parseISO(s.date).getTime()) / 86400000 < 7).length} 次训练</em></div></Card>
+      <Card><div className="metric-icon amber"><Flame /></div><div><span>7日训练量</span><strong>{Math.round(weeklyVolume / 100) / 10}<small> t</small></strong><em>{weeklySessions.length} 次训练</em></div></Card>
       <Card><div className="metric-icon violet"><Trophy /></div><div><span>本期最佳</span><strong>{prs.深蹲 || "—"}<small> kg</small></strong><em>深蹲负重</em></div></Card>
     </div>
 
@@ -124,11 +140,12 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
     </Card>
 
     <Card className="today-card">
-      <CardHeader title="今日计划" subtitle="下肢力量 · 预计 70 分钟" action={<button className="icon-button"><MoreHorizontal /></button>} />
-      <div className="plan-feature"><div className="plan-number">01</div><div><span>主项</span><h3>高杠深蹲</h3><p>4 × 3 · 目标速度 0.42–0.55 m/s</p></div><div className="target-load"><span>建议负荷</span><strong>135–145<small> kg</small></strong></div></div>
-      <div className="plan-row"><span>02</span><div><strong>罗马尼亚硬拉</strong><small>3 × 6 · RPE 7</small></div><ChevronRight /></div>
-      <div className="plan-row"><span>03</span><div><strong>保加利亚分腿蹲</strong><small>3 × 8 / 侧</small></div><ChevronRight /></div>
-      <button className="btn primary full" onClick={() => go("session")}><Zap />进入训练模式</button>
+      <CardHeader title={nextPlan?.date === today() ? "今日计划" : "下次计划"} subtitle={nextPlan ? `${fmtDate(nextPlan.date)} · ${nextPlan.type}` : "尚未安排训练"} action={<button className="icon-button" onClick={() => go("session")}><MoreHorizontal /></button>} />
+      {nextPlan ? <>
+        {nextPlan.exercises.slice(0, 1).map((block) => <div className="plan-feature" key={block.id}><div className="plan-number">01</div><div><span>主项</span><h3>{block.exercise}</h3><p>{block.sets.length} 组 · {block.sets[0]?.reps || "—"} 次</p></div><div className="target-load"><span>计划负荷</span><strong>{block.sets[0]?.weight || "—"}<small> kg</small></strong></div></div>)}
+        {nextPlan.exercises.slice(1, 3).map((block, index) => <div className="plan-row" key={block.id}><span>{String(index + 2).padStart(2, "0")}</span><div><strong>{block.exercise}</strong><small>{block.sets.length} 组 · {block.sets[0]?.reps || "—"} 次</small></div><ChevronRight /></div>)}
+      </> : <EmptyState icon={CalendarDays} title="还没有训练计划" text="在训练记录中选择未来日期即可创建计划。" />}
+      <button className="btn primary full" onClick={() => go("session")}><Zap />{nextPlan ? "查看训练计划" : "制定训练计划"}</button>
     </Card>
 
     <Card className="performance-card">
@@ -145,54 +162,93 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
   </div>;
 }
 
-function ReadinessPage({ latest, onChanged }: { latest?: ReadinessEntry; onChanged: () => void }) {
+function ReadinessPage({ latest, history, onChanged }: { latest?: ReadinessEntry; history: ReadinessEntry[]; onChanged: () => void }) {
   const [saved, setSaved] = useState(false);
-  const [form, setForm] = useState({ date: today(), sleepHours: latest?.sleepHours ?? 7.5, sleepQuality: latest?.sleepQuality ?? 4, fatigue: 2, soreness: 2, stress: 2, hrv: latest?.hrv ?? 62, restingHr: latest?.restingHr ?? 58 });
-  const score = readinessScore(form);
+  const [form, setForm] = useState({
+    date: today(), sleepHours: latest?.sleepHours ?? 7.5, sleepQuality: latest?.sleepQuality ?? 4,
+    fatigue: 2, soreness: 2, stress: 2, hrv: latest?.hrv ?? 62, restingHr: latest?.restingHr ?? 58,
+    armSwingCmj: latest?.armSwingCmj ?? 0, noArmCmj: latest?.noArmCmj ?? 0,
+    gripLeft: latest?.gripLeft ?? 0, gripRight: latest?.gripRight ?? 0, healthSource: "manual" as const
+  });
+  const performance = performanceReadiness(form, history.filter((entry) => entry.date < form.date));
+  const wellnessScore = readinessScore(form);
+  const score = performance === null ? wellnessScore : Math.round(wellnessScore * .8 + performance * .2);
   const recommendation = readinessRecommendation(score);
-  const update = (key: keyof typeof form, value: string | number) => setForm((current) => ({ ...current, [key]: typeof current[key] === "number" ? Number(value) : value }));
-  const submit = async () => { const existing = await db.readiness.where("date").equals(form.date).first(); if (existing?.id) await db.readiness.update(existing.id, { ...form, score, recommendation }); else await db.readiness.add({ ...form, score, recommendation }); onChanged(); setSaved(true); setTimeout(() => setSaved(false), 2400); };
+  const update = (key: keyof typeof form, value: string | number) => setForm((current) => ({ ...current, [key]: key === "date" ? value : Number(value) }));
+  const submit = async () => {
+    const existing = await db.readiness.where("date").equals(form.date).first();
+    const payload = { ...form, score, recommendation };
+    if (existing?.id) await db.readiness.update(existing.id, payload); else await db.readiness.add(payload);
+    onChanged(); setSaved(true); setTimeout(() => setSaved(false), 2400);
+  };
   return <div className="readiness-layout">
-    <Card className="assessment-card"><CardHeader title="今日状态检查" subtitle="约 30 秒完成，所有数据只保存在你的设备" />
-      <div className="assessment-section"><h3>恢复基础</h3><div className="form-grid three"><label><span>睡眠时长</span><div className="input-unit"><input type="number" step="0.1" min="0" max="14" value={form.sleepHours} onChange={(e) => update("sleepHours", e.target.value)} /><em>小时</em></div></label><label><span>HRV</span><div className="input-unit"><input type="number" min="1" value={form.hrv} onChange={(e) => update("hrv", e.target.value)} /><em>ms</em></div></label><label><span>静息心率</span><div className="input-unit"><input type="number" min="30" value={form.restingHr} onChange={(e) => update("restingHr", e.target.value)} /><em>bpm</em></div></label></div></div>
-      <div className="assessment-section"><h3>主观感受</h3>{([['sleepQuality','睡眠质量','差','很好'],['fatigue','整体疲劳','轻松','很疲劳'],['soreness','肌肉酸痛','无','严重'],['stress','心理压力','轻松','很高']] as const).map(([key,label,left,right]) => <div className="range-field" key={key}><div><span>{label}</span><strong>{form[key]} / 5</strong></div><input type="range" min="1" max="5" value={form[key]} onChange={(e) => update(key, e.target.value)} /><div className="range-labels"><span>{left}</span><span>{right}</span></div></div>)}</div>
-      <button className="btn primary full" onClick={submit}><Save />{saved ? "已保存" : "保存今日状态"}</button>
+    <Card className="assessment-card"><CardHeader title="每日状态检查" subtitle="恢复、主观感受与运动表现三部分综合评估" action={<label className="compact-date"><span>评估日期</span><input type="date" value={form.date} onChange={(e) => update("date", e.target.value)} /></label>} />
+      <div className="health-connect-note"><Smartphone /><div><strong>Apple 健康数据连接</strong><p>普通网页无法直接申请 HealthKit 权限。当前支持手动录入；后续可通过 iOS 快捷指令或原生 App 桥接自动同步睡眠、HRV 与静息心率。</p></div><span>网页限制</span></div>
+      <div className="assessment-section"><div className="section-title"><div><span>01</span><h3>客观恢复指标</h3></div><em>健康与恢复</em></div><div className="form-grid three"><label><span>睡眠时长</span><div className="input-unit"><input type="number" step="0.1" min="0" max="14" value={form.sleepHours} onChange={(e) => update("sleepHours", e.target.value)} /><em>小时</em></div></label><label><span>HRV</span><div className="input-unit"><input type="number" min="1" value={form.hrv} onChange={(e) => update("hrv", e.target.value)} /><em>ms</em></div></label><label><span>静息心率</span><div className="input-unit"><input type="number" min="30" value={form.restingHr} onChange={(e) => update("restingHr", e.target.value)} /><em>bpm</em></div></label></div></div>
+      <div className="assessment-section"><div className="section-title"><div><span>02</span><h3>主观感受</h3></div><em>1–5 分</em></div>{([['sleepQuality','睡眠质量','差','很好'],['fatigue','整体疲劳','轻松','很疲劳'],['soreness','肌肉酸痛','无','严重'],['stress','心理压力','轻松','很高']] as const).map(([key,label,left,right]) => <div className="range-field" key={key}><div><span>{label}</span><strong>{form[key]} / 5</strong></div><input type="range" min="1" max="5" value={form[key]} onChange={(e) => update(key, e.target.value)} /><div className="range-labels"><span>{left}</span><span>{right}</span></div></div>)}</div>
+      <div className="assessment-section"><div className="section-title"><div><span>03</span><h3>运动表现指标</h3></div><em>{performance === null ? "建立个人基线中" : `今日指数 ${performance}%`}</em></div><div className="form-grid performance-grid"><label><span>摆臂 CMJ</span><div className="input-unit"><input type="number" step="0.1" min="0" placeholder="未测试" value={form.armSwingCmj || ""} onChange={(e) => update("armSwingCmj", e.target.value)} /><em>cm</em></div></label><label><span>不摆臂 CMJ</span><div className="input-unit"><input type="number" step="0.1" min="0" placeholder="未测试" value={form.noArmCmj || ""} onChange={(e) => update("noArmCmj", e.target.value)} /><em>cm</em></div></label><label><span>左手握力</span><div className="input-unit"><input type="number" step="0.1" min="0" placeholder="未测试" value={form.gripLeft || ""} onChange={(e) => update("gripLeft", e.target.value)} /><em>kg</em></div></label><label><span>右手握力</span><div className="input-unit"><input type="number" step="0.1" min="0" placeholder="未测试" value={form.gripRight || ""} onChange={(e) => update("gripRight", e.target.value)} /><em>kg</em></div></label></div><p className="baseline-note"><Info />至少两次有效记录后，运动表现会按个人近期基线占准备度的 20%。未测试时不会降低分数。</p></div>
+      <button className="btn primary full" onClick={submit}><Save />{saved ? "已保存" : `保存 ${fmtDate(form.date)} 状态`}</button>
     </Card>
-    <div className="assessment-result"><Card className="result-card"><span className="result-kicker">实时结果</span><ScoreRing value={score} /><h2>{score >= 85 ? "状态很好" : score >= 70 ? "可以训练" : score >= 55 ? "适当减量" : "恢复优先"}</h2><p>{recommendation}</p><div className="decision-list"><div><Activity /><span>训练强度</span><strong>{score >= 85 ? "100%" : score >= 70 ? "90–100%" : score >= 55 ? "75–90%" : "≤70%"}</strong></div><div><Target /><span>冲重建议</span><strong>{score >= 85 ? "可选" : "不建议"}</strong></div><div><RefreshCw /><span>组间监控</span><strong>速度损失 ≤20%</strong></div></div></Card></div>
+    <div className="assessment-result"><Card className="result-card"><span className="result-kicker">实时结果</span><ScoreRing value={score} /><h2>{score >= 85 ? "状态很好" : score >= 70 ? "可以训练" : score >= 55 ? "适当减量" : "恢复优先"}</h2><p>{recommendation}</p><div className="decision-list"><div><Activity /><span>综合准备度</span><strong>{score}%</strong></div><div><TrendingUp /><span>运动表现</span><strong>{performance === null ? "待建立基线" : `${performance}%`}</strong></div><div><Target /><span>冲重建议</span><strong>{score >= 85 ? "可选" : "不建议"}</strong></div><div><RefreshCw /><span>训练强度</span><strong>{score >= 85 ? "100%" : score >= 70 ? "90–100%" : score >= 55 ? "75–90%" : "≤70%"}</strong></div></div></Card></div>
   </div>;
 }
 
 const blankSet = (): SetEntry => ({ id: uid(), weight: 100, reps: 3, velocity: 0.5, rpe: 7, completed: true });
 const blankBlock = (): ExerciseBlock => ({ id: uid(), exercise: "深蹲", sets: [blankSet()] });
 
-function SessionPage({ onSaved }: { onSaved: () => void }) {
+function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSession[]; settings?: AthleteSettings; onSaved: () => void }) {
   const [session, setSession] = useState<TrainingSession>({ date: today(), type: "下肢力量", duration: 60, notes: "", exercises: [blankBlock()], completed: false });
   const [message, setMessage] = useState("");
+  const isFuture = session.date > today();
   const updateBlock = (blockId: string, fn: (block: ExerciseBlock) => ExerciseBlock) => setSession((s) => ({ ...s, exercises: s.exercises.map((b) => b.id === blockId ? fn(b) : b) }));
   const updateSet = (blockId: string, setId: string, key: keyof SetEntry, value: number | boolean) => updateBlock(blockId, (block) => ({ ...block, sets: block.sets.map((set) => set.id === setId ? { ...set, [key]: value } : set) }));
-  const save = async () => { if (!session.exercises.some((b) => b.sets.some((s) => s.completed))) { setMessage("至少完成一组后才能保存训练。"); return; } await db.sessions.add({ ...session, completed: true }); setMessage("训练已保存到本机数据库。"); onSaved(); };
+  const changeDate = (date: string) => {
+    const existing = sessions.find((item) => item.date === date && (!item.completed || date > today()));
+    setSession(existing ? structuredClone(existing) : { date, type: "下肢力量", duration: 60, notes: "", exercises: [blankBlock()], completed: false });
+    setMessage(existing ? "已载入该日期的训练计划。" : "");
+  };
+  const save = async () => {
+    if (!session.exercises.length || !session.exercises.some((block) => block.sets.length)) { setMessage("请至少添加一个动作和一组计划。"); return; }
+    if (!isFuture && !session.exercises.some((block) => block.sets.some((set) => set.completed))) { setMessage("至少完成一组后才能保存训练。"); return; }
+    const payload: TrainingSession = {
+      ...session,
+      duration: isFuture ? 0 : session.duration,
+      completed: !isFuture,
+      exercises: isFuture ? session.exercises.map((block) => ({ ...block, sets: block.sets.map((set) => ({ ...set, completed: false })) })) : session.exercises
+    };
+    if (payload.id) await db.sessions.put(payload); else payload.id = await db.sessions.add(payload);
+    setSession(payload);
+    setMessage(isFuture ? "训练计划已保存并同步。" : "训练记录已保存并同步。");
+    onSaved();
+  };
   return <div className="session-layout">
-    <Card className="session-control"><CardHeader title="本次训练" subtitle="输入每组最快一次平均向心速度" />
-      <div className="form-grid three"><label><span>日期</span><input type="date" value={session.date} onChange={(e) => setSession({ ...session, date: e.target.value })} /></label><label><span>训练类型</span><select value={session.type} onChange={(e) => setSession({ ...session, type: e.target.value as TrainingSession["type"] })}>{["下肢力量","上肢力量","举重技术","测试","恢复"].map((type) => <option key={type}>{type}</option>)}</select></label><label><span>时长</span><div className="input-unit"><input type="number" value={session.duration} onChange={(e) => setSession({ ...session, duration: Number(e.target.value) })} /><em>分钟</em></div></label></div>
+    <Card className="session-control"><CardHeader title={isFuture ? "制定训练计划" : "记录本次训练"} subtitle={isFuture ? "未来日期自动保存为计划，到训练日再填写完成状态、速度与时长" : "输入每组最快一次平均向心速度"} action={<span className={`session-mode ${isFuture ? "planned" : "live"}`}>{isFuture ? "未来计划" : "训练记录"}</span>} />
+      <div className="form-grid three"><label><span>日期</span><input type="date" value={session.date} onChange={(e) => changeDate(e.target.value)} /></label><label><span>训练类型</span><select value={session.type} onChange={(e) => setSession({ ...session, type: e.target.value as TrainingSession["type"] })}>{trainingTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>训练时长</span>{isFuture ? <div className="deferred-field">训练结束后填写</div> : <div className="input-unit"><input type="number" min="0" value={session.duration} onChange={(e) => setSession({ ...session, duration: Number(e.target.value) })} /><em>分钟</em></div>}</label></div>
     </Card>
-    {session.exercises.map((block, blockIndex) => { const loss = velocityLoss(block.sets.filter((s) => s.completed)); return <Card className="exercise-card" key={block.id}>
-      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<select value={block.exercise} onChange={(e) => updateBlock(block.id, (b) => ({ ...b, exercise: e.target.value as ExerciseName }))}>{exercises.map((name) => <option key={name}>{name}</option>)}</select></label><span>{block.sets.length} 组 · 当前速度损失 {loss.toFixed(1)}%</span></div><div className={`loss-badge ${loss > 20 ? "danger" : loss > 10 ? "warn" : "good"}`}><Gauge /><strong>{loss.toFixed(0)}%</strong><span>速度损失</span></div></div>
-      <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>状态</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" value={set.weight} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" value={set.reps} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><input aria-label={`第${index+1}组速度`} type="number" step="0.01" value={set.velocity} onChange={(e) => updateSet(block.id, set.id, "velocity", Number(e.target.value))} /><input aria-label={`第${index+1}组RPE`} type="number" step="0.5" min="1" max="10" value={set.rpe} onChange={(e) => updateSet(block.id, set.id, "rpe", Number(e.target.value))} /><label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label><button className="icon-button danger" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: b.sets.filter((s) => s.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
+    {session.exercises.map((block, blockIndex) => {
+      const historicalPoints = sessions.filter((item) => item.completed).flatMap((item) => item.exercises.filter((candidate) => candidate.exercise === block.exercise).flatMap((candidate) => candidate.sets.filter((set) => set.completed && set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }))));
+      const mvt = exerciseMvt(settings, block.exercise);
+      const regression = mvt && new Set(historicalPoints.map((point) => point.weight)).size >= 2 ? linearRegression(historicalPoints, mvt) : null;
+      const e1rm = regression && regression.estimated1RM > 0 && regression.r2 >= .5 ? regression.estimated1RM : null;
+      return <Card className="exercise-card" key={block.id}>
+      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {e1rm ? `基于 ${historicalPoints.length} 个历史速度点` : "历史 LVP 数据不足或未设置 MVT"}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
+      <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>{isFuture ? "计划" : "状态"}</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" min="0" value={set.weight || ""} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" min="0" value={set.reps || ""} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><input aria-label={`第${index+1}组速度`} type="number" step="0.01" min="0" placeholder={isFuture ? "可留空" : "0.00"} value={set.velocity || ""} onChange={(e) => updateSet(block.id, set.id, "velocity", Number(e.target.value))} /><input aria-label={`第${index+1}组RPE`} type="number" step="0.5" min="0" max="10" placeholder={isFuture ? "可留空" : "1–10"} value={set.rpe || ""} onChange={(e) => updateSet(block.id, set.id, "rpe", Number(e.target.value))} />{isFuture ? <span className="planned-set">待训练</span> : <label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label>}<button className="icon-button danger" onClick={() => updateBlock(block.id, (candidate) => ({ ...candidate, sets: candidate.sets.filter((item) => item.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
       <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: [...b.sets, { ...blankSet(), weight: b.sets.at(-1)?.weight || 100 }] }))}><Plus />添加一组</button>
     </Card>})}
     <button className="add-exercise" onClick={() => setSession((s) => ({ ...s, exercises: [...s.exercises, blankBlock()] }))}><Plus /><span>添加训练动作</span></button>
-    <Card className="session-finish"><label><span>训练备注</span><textarea placeholder="记录技术感受、疼痛或计划调整…" value={session.notes} onChange={(e) => setSession({ ...session, notes: e.target.value })} /></label><div><p className={message.includes("至少") ? "error" : "success"}>{message}</p><button className="btn primary" onClick={save}><Save />完成并保存训练</button></div></Card>
+    <Card className="session-finish"><label><span>{isFuture ? "计划备注" : "训练备注"}</span><textarea placeholder={isFuture ? "记录训练目标、重点技术或负荷安排…" : "记录技术感受、疼痛或计划调整…"} value={session.notes} onChange={(e) => setSession({ ...session, notes: e.target.value })} /></label><div><p className={message.includes("至少") || message.includes("请") ? "error" : "success"}>{message}</p><button className="btn primary" onClick={save}><Save />{isFuture ? "保存训练计划" : "完成并保存训练"}</button></div></Card>
   </div>;
 }
 
 function VbtPage({ sessions, settings }: { sessions: TrainingSession[]; settings?: AthleteSettings }) {
   const [exercise, setExercise] = useState<ExerciseName>("深蹲");
-  const points = useMemo(() => sessions.flatMap((session) => session.exercises.filter((b) => b.exercise === exercise).flatMap((b) => b.sets.filter((s) => s.completed && s.weight > 0 && s.velocity > 0).map((s) => ({ weight: s.weight, velocity: s.velocity, date: session.date })))).sort((a,b) => a.weight - b.weight), [sessions, exercise]);
-  const regression = linearRegression(points, settings?.mvt[exercise] ?? 0.3);
-  const lineData = regression && points.length ? [{ weight: Math.min(...points.map((p) => p.weight)) - 5, velocity: regression.slope * (Math.min(...points.map((p) => p.weight)) - 5) + regression.intercept }, { weight: regression.estimated1RM, velocity: settings?.mvt[exercise] ?? 0.3 }] : [];
+  const points = useMemo(() => sessions.filter((session) => session.completed).flatMap((session) => session.exercises.filter((b) => b.exercise === exercise).flatMap((b) => b.sets.filter((s) => s.completed && s.weight > 0 && s.velocity > 0).map((s) => ({ weight: s.weight, velocity: s.velocity, date: session.date })))).sort((a,b) => a.weight - b.weight), [sessions, exercise]);
+  const mvt = exerciseMvt(settings, exercise);
+  const regression = mvt ? linearRegression(points, mvt) : null;
+  const lineData = regression && points.length ? [{ weight: Math.min(...points.map((p) => p.weight)) - 5, velocity: regression.slope * (Math.min(...points.map((p) => p.weight)) - 5) + regression.intercept }, { weight: regression.estimated1RM, velocity: mvt }] : [];
   return <div className="vbt-layout">
-    <Card className="profile-controls"><div><span>动作画像</span><select value={exercise} onChange={(e) => setExercise(e.target.value as ExerciseName)}>{exercises.map((name) => <option key={name}>{name}</option>)}</select></div><div className="profile-status"><span className="status-dot" />{points.length >= 4 ? "画像数据充足" : "需要更多数据"}</div></Card>
-    <div className="metric-strip vbt-metrics"><Card><div className="metric-icon lime"><Trophy /></div><div><span>估算 1RM</span><strong>{regression ? regression.estimated1RM.toFixed(1) : "—"}<small> kg</small></strong><em>基于个人 LVP</em></div></Card><Card><div className="metric-icon blue"><Target /></div><div><span>最小速度阈值</span><strong>{settings?.mvt[exercise] ?? "—"}<small> m/s</small></strong><em>{exercise}专属</em></div></Card><Card><div className="metric-icon amber"><CircleGauge /></div><div><span>模型拟合度</span><strong>{regression ? (regression.r2 * 100).toFixed(0) : "—"}<small>%</small></strong><em>{points.length} 个有效观测</em></div></Card></div>
+    <Card className="profile-controls"><div><span>动作画像</span><ExerciseSelect value={exercise} onChange={setExercise} /></div><div className="profile-status"><span className="status-dot" />{!mvt ? "该动作尚未设置 MVT" : points.length >= 4 ? "画像数据充足" : "需要更多数据"}</div></Card>
+    <div className="metric-strip vbt-metrics"><Card><div className="metric-icon lime"><Trophy /></div><div><span>估算 1RM</span><strong>{regression ? regression.estimated1RM.toFixed(1) : "—"}<small> kg</small></strong><em>基于个人 LVP</em></div></Card><Card><div className="metric-icon blue"><Target /></div><div><span>最小速度阈值</span><strong>{mvt ?? "—"}<small> m/s</small></strong><em>{exercise}专属</em></div></Card><Card><div className="metric-icon amber"><CircleGauge /></div><div><span>模型拟合度</span><strong>{regression ? (regression.r2 * 100).toFixed(0) : "—"}<small>%</small></strong><em>{points.length} 个有效观测</em></div></Card></div>
     <Card className="lvp-chart"><CardHeader title={`${exercise} 负荷–速度画像`} subtitle="每个点代表一组最快重复；虚线为个人回归趋势" />
       {points.length >= 2 ? <div className="chart-box tall"><ResponsiveContainer width="100%" height="100%"><ScatterChart margin={{ top: 16, right: 24, left: 0, bottom: 8 }}><CartesianGrid stroke="var(--line)" strokeDasharray="3 3" /><XAxis type="number" dataKey="weight" name="负重" unit="kg" domain={["dataMin - 10", "dataMax + 15"]} tickFormatter={(value) => Math.round(value).toString()} tick={{ fill: "var(--muted)", fontSize: 12 }} /><YAxis type="number" dataKey="velocity" name="速度" unit="m/s" domain={[0, "dataMax + 0.15"]} tickFormatter={(value) => Number(value).toFixed(2)} tick={{ fill: "var(--muted)", fontSize: 12 }} /><Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(value) => typeof value === "number" ? value.toFixed(2) : value} contentStyle={{ borderRadius: 12, border: "1px solid var(--line)" }} /><Scatter name="训练组" data={points} fill="#173f31">{points.map((_, index) => <Cell key={index} fill={index === points.length - 1 ? "#98cf4f" : "#173f31"} />)}</Scatter><Line data={lineData} type="linear" dataKey="velocity" stroke="#e79545" strokeWidth={2} strokeDasharray="6 5" dot={false} activeDot={false} legendType="none" /></ScatterChart></ResponsiveContainer></div> : <EmptyState icon={TrendingUp} title="还无法建立画像" text="至少记录两组不同负重与速度数据。" />}
     </Card>
@@ -201,13 +257,15 @@ function VbtPage({ sessions, settings }: { sessions: TrainingSession[]; settings
   </div>;
 }
 
-function HistoryPage({ sessions, onChanged }: { sessions: TrainingSession[]; onChanged: () => void }) {
+function HistoryPage({ sessions, readiness, onChanged }: { sessions: TrainingSession[]; readiness: ReadinessEntry[]; onChanged: () => void }) {
   const [filter, setFilter] = useState<"全部" | TrainingSession["type"]>("全部");
   const [expanded, setExpanded] = useState<number | null>(null);
   const visible = filter === "全部" ? sessions : sessions.filter((s) => s.type === filter);
   const remove = async (id?: number) => { if (!id || !window.confirm("确定删除这条训练记录吗？此操作不可撤销。")) return; await db.sessions.delete(id); onChanged(); };
-  return <div className="history-layout"><Card><CardHeader title="训练记录" subtitle={`${sessions.length} 次训练已保存在本机`} action={<select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}><option>全部</option>{["下肢力量","上肢力量","举重技术","测试","恢复"].map((type) => <option key={type}>{type}</option>)}</select>} />
-    <div className="history-list">{visible.map((session) => <article className={`history-item ${expanded === session.id ? "expanded" : ""}`} key={session.id}><button className="history-summary" onClick={() => setExpanded(expanded === session.id ? null : session.id || null)}><div className="history-date"><strong>{format(parseISO(session.date), "dd")}</strong><span>{format(parseISO(session.date), "MMM", { locale: zhCN })}</span></div><div><strong>{session.type}</strong><span>{session.exercises.map((b) => b.exercise).join(" · ")}</span></div><div className="history-stat"><span>训练量</span><strong>{Math.round(sessionVolume(session)/100)/10} t</strong></div><div className="history-stat"><span>时长</span><strong>{session.duration} min</strong></div><ChevronRight /></button>{expanded === session.id && <div className="history-detail">{session.exercises.map((block) => <div key={block.id}><h4>{block.exercise}</h4><div className="mini-sets">{block.sets.filter((s) => s.completed).map((set, i) => <span key={set.id}>{i+1}. {set.weight}kg × {set.reps} · {set.velocity.toFixed(2)}m/s</span>)}</div></div>)}{session.notes && <p>备注：{session.notes}</p>}<button className="btn danger-outline" onClick={() => remove(session.id)}><Trash2 />删除记录</button></div>}</article>)}{visible.length === 0 && <EmptyState icon={History} title="没有匹配记录" text="调整筛选条件或开始一节新训练。" />}</div>
+  return <div className="history-layout"><Card><CardHeader title="训练与计划" subtitle={`${sessions.filter((item) => item.completed).length} 次已完成 · ${sessions.filter((item) => !item.completed).length} 个计划`} action={<select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}><option>全部</option>{trainingTypes.map((type) => <option key={type}>{type}</option>)}</select>} />
+    <div className="history-list">{visible.map((session) => { const dayReadiness = readiness.find((entry) => entry.date === session.date); return <article className={`history-item ${expanded === session.id ? "expanded" : ""}`} key={session.id}><button className="history-summary" onClick={() => setExpanded(expanded === session.id ? null : session.id || null)}><div className="history-date"><strong>{format(parseISO(session.date), "dd")}</strong><span>{format(parseISO(session.date), "MMM", { locale: zhCN })}</span></div><div><strong>{session.type}<em className={`history-status ${session.completed ? "done" : "plan"}`}>{session.completed ? "已完成" : "计划"}</em></strong><span>{session.exercises.map((b) => b.exercise).join(" · ")}</span></div><div className="history-stat"><span>{session.completed ? "训练量" : "动作数"}</span><strong>{session.completed ? `${Math.round(sessionVolume(session)/100)/10} t` : `${session.exercises.length} 个`}</strong></div><div className="history-stat"><span>{dayReadiness ? "准备度" : "时长"}</span><strong>{dayReadiness ? `${dayReadiness.score}%` : session.completed ? `${session.duration} min` : "—"}</strong></div><ChevronRight /></button>{expanded === session.id && <div className="history-detail">
+      {dayReadiness && <div className="history-readiness"><div><span>当日准备度</span><strong>{dayReadiness.score}</strong></div><span>睡眠 {dayReadiness.sleepHours}h</span><span>HRV {dayReadiness.hrv}ms</span><span>静息心率 {dayReadiness.restingHr}bpm</span>{dayReadiness.noArmCmj ? <span>CMJ {dayReadiness.noArmCmj}cm</span> : null}{dayReadiness.gripLeft || dayReadiness.gripRight ? <span>握力 {dayReadiness.gripLeft || "—"}/{dayReadiness.gripRight || "—"}kg</span> : null}</div>}
+      {session.exercises.map((block) => <div key={block.id}><h4>{block.exercise}</h4><div className="mini-sets">{block.sets.filter((set) => !session.completed || set.completed).map((set, i) => <span key={set.id}>{i+1}. {set.weight}kg × {set.reps}{set.velocity > 0 ? ` · ${set.velocity.toFixed(2)}m/s` : ""}</span>)}</div></div>)}{session.notes && <p>{session.completed ? "训练备注" : "计划备注"}：{session.notes}</p>}<button className="btn danger-outline" onClick={() => remove(session.id)}><Trash2 />删除{session.completed ? "记录" : "计划"}</button></div>}</article>})}{visible.length === 0 && <EmptyState icon={History} title="没有匹配记录" text="调整筛选条件或开始一节新训练。" />}</div>
   </Card></div>;
 }
 
@@ -223,7 +281,7 @@ function DataPage({ settings, onChanged, cloudEnabled }: { settings?: AthleteSet
   const importJson = async (file?: File) => { if (!file) return; try { const payload = JSON.parse(await file.text()); if (!Array.isArray(payload.sessions) || !Array.isArray(payload.readiness)) throw new Error(); await db.transaction("rw", db.sessions, db.readiness, db.settings, async () => { await db.sessions.clear(); await db.readiness.clear(); if (payload.sessions.length) await db.sessions.bulkAdd(payload.sessions); if (payload.readiness.length) await db.readiness.bulkAdd(payload.readiness); if (payload.settings?.length) await db.settings.bulkPut(payload.settings); }); onChanged(); setStatus("数据导入完成并等待同步"); } catch { setStatus("导入失败：文件格式不正确"); } };
   const clearData = async () => { if (!window.confirm("这会删除所有训练与状态记录。请先导出备份，确定继续吗？")) return; await db.sessions.clear(); await db.readiness.clear(); onChanged(); setStatus("训练数据已清空并等待同步"); };
   return <div className="data-layout"><Card><CardHeader title="运动员档案" subtitle="用于个体化计算与界面显示" /><div className="form-grid three"><label><span>姓名</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label><span>体重</span><div className="input-unit"><input type="number" step="0.1" value={form.bodyWeight} onChange={(e) => setForm({ ...form, bodyWeight: Number(e.target.value) })} /><em>kg</em></div></label><label><span>单位</span><select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as "kg" | "lb" })}><option value="kg">公斤 kg</option><option value="lb">磅 lb</option></select></label></div><button className="btn primary" onClick={saveSettings}><Save />保存档案</button></Card>
-    <Card><CardHeader title="动作 MVT" subtitle="速度达到该阈值时视为接近最大负荷" /><div className="mvt-grid">{exercises.map((name) => <label key={name}><span>{name}</span><div className="input-unit"><input type="number" step="0.01" value={form.mvt[name]} onChange={(e) => setForm({ ...form, mvt: { ...form.mvt, [name]: Number(e.target.value) } })} /><em>m/s</em></div></label>)}</div><button className="btn primary" onClick={saveSettings}><Save />保存阈值</button></Card>
+    <Card><CardHeader title="动作 MVT" subtitle="用于个人负荷–速度曲线与 e1RM；仅显示适合 VBT 建模的动作" /><div className="mvt-grid">{vbtExercises.map((item) => <label key={item.name}><span>{item.name}</span><div className="input-unit"><input type="number" step="0.01" value={form.mvt[item.name] ?? item.defaultMvt ?? ""} onChange={(e) => setForm({ ...form, mvt: { ...form.mvt, [item.name]: Number(e.target.value) } })} /><em>m/s</em></div></label>)}</div><button className="btn primary" onClick={saveSettings}><Save />保存阈值</button></Card>
     <Card><CardHeader title="备份与迁移" subtitle="建议每周导出一次完整 JSON 备份" /><div className="data-actions"><button className="btn primary" onClick={exportJson}><Download />导出完整备份</button><button className="btn ghost" onClick={exportCsv}><Download />导出训练 CSV</button><button className="btn ghost" onClick={() => fileRef.current?.click()}><FileUp />导入 JSON</button><input ref={fileRef} hidden type="file" accept="application/json" onChange={(e) => importJson(e.target.files?.[0])} /></div><div className="local-note">{cloudEnabled ? <Cloud /> : <CloudOff />}<div><strong>{cloudEnabled ? "本地优先 + 云端同步" : "仅本地模式"}</strong><span>{cloudEnabled ? "修改会自动同步，离线时仍可继续记录。" : "配置 Supabase 后启用跨设备同步。"}</span></div></div></Card>
     <Card className="danger-zone"><CardHeader title="危险操作" subtitle="清空后只能通过此前导出的 JSON 恢复" /><button className="btn danger-outline" onClick={clearData}><Trash2 />清空训练与状态数据</button></Card>{status && <div className="toast" role="status">{status}</div>}</div>;
 }
@@ -358,10 +416,10 @@ export default function App() {
 
   return <AppShell page={page} setPage={setPage} settings={settings} account={account} syncState={syncState} onSync={() => void syncNow()} onLogout={() => void logout()}>
     {page === "dashboard" && <Dashboard sessions={sessions} readiness={readiness} settings={settings} go={setPage} />}
-    {page === "readiness" && <ReadinessPage latest={readiness[0]} onChanged={queueSync} />}
-    {page === "session" && <SessionPage onSaved={() => { queueSync(); setPage("history"); }} />}
+    {page === "readiness" && <ReadinessPage latest={readiness[0]} history={readiness} onChanged={queueSync} />}
+    {page === "session" && <SessionPage sessions={sessions} settings={settings} onSaved={() => { queueSync(); setPage("history"); }} />}
     {page === "vbt" && <VbtPage sessions={sessions} settings={settings} />}
-    {page === "history" && <HistoryPage sessions={sessions} onChanged={queueSync} />}
+    {page === "history" && <HistoryPage sessions={sessions} readiness={readiness} onChanged={queueSync} />}
     {page === "data" && <DataPage settings={settings} onChanged={queueSync} cloudEnabled={cloudConfigured} />}
   </AppShell>;
 }

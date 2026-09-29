@@ -28,6 +28,21 @@ export function readinessRecommendation(score: number): string {
   return "恢复优先，建议技术训练或低强度活动";
 }
 
+type PerformanceFields = Pick<ReadinessEntry, "armSwingCmj" | "noArmCmj" | "gripLeft" | "gripRight">;
+
+export function performanceReadiness(current: PerformanceFields, history: PerformanceFields[]): number | null {
+  const keys: (keyof PerformanceFields)[] = ["armSwingCmj", "noArmCmj", "gripLeft", "gripRight"];
+  const ratios = keys.flatMap((key) => {
+    const value = Number(current[key] || 0);
+    const baselineValues = history.map((entry) => Number(entry[key] || 0)).filter((item) => item > 0).slice(0, 14);
+    if (value <= 0 || baselineValues.length < 2) return [];
+    const baseline = baselineValues.reduce((sum, item) => sum + item, 0) / baselineValues.length;
+    return [Math.min(110, Math.max(75, value / baseline * 100))];
+  });
+  if (!ratios.length) return null;
+  return Math.round(ratios.reduce((sum, value) => sum + value, 0) / ratios.length);
+}
+
 export interface RegressionResult {
   slope: number;
   intercept: number;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { linearRegression, readinessScore, velocityLoss } from "./metrics";
+import { linearRegression, performanceReadiness, readinessScore, velocityLoss } from "./metrics";
 
 describe("VBT metrics", () => {
   it("calculates velocity loss from fastest to latest set", () => {
@@ -17,5 +17,17 @@ describe("VBT metrics", () => {
     expect(result).not.toBeNull();
     expect(result!.slope).toBeLessThan(0);
     expect(result!.estimated1RM).toBeGreaterThan(95);
+  });
+
+  it("compares jump and grip results with the athlete baseline", () => {
+    const score = performanceReadiness(
+      { armSwingCmj: 60, noArmCmj: 50, gripLeft: 55, gripRight: 57 },
+      [
+        { armSwingCmj: 58, noArmCmj: 49, gripLeft: 54, gripRight: 56 },
+        { armSwingCmj: 59, noArmCmj: 50, gripLeft: 55, gripRight: 56 }
+      ]
+    );
+    expect(score).not.toBeNull();
+    expect(score!).toBeGreaterThanOrEqual(100);
   });
 });
