@@ -33,8 +33,10 @@ jobs:
       - run: pnpm test
       - run: pnpm build
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          # These values are intentionally public and are embedded in the browser bundle.
+          # Database access is controlled by Supabase row-level security policies.
+          VITE_SUPABASE_URL: https://lkmlbljldlxtyvijlzbu.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_kajQZrmxh6zeDOYhrvEhyw_IapBPBLz
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
         with:
@@ -44,3 +46,4 @@ jobs:
           path: apps/web/dist
       - id: deployment
         uses: actions/deploy-pages@v4
+
