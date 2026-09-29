@@ -12,7 +12,7 @@ export interface CloudSnapshot {
 export type SyncState = "idle" | "syncing" | "synced" | "offline" | "error" | "unconfigured";
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/$/, "");
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+const supabaseKey = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY) as string | undefined;
 
 export const cloudConfigured = Boolean(supabaseUrl && supabaseKey);
 
