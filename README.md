@@ -45,4 +45,3 @@ push to `main`. Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as reposito
 Actions secrets before deployment when cloud sync is required.
 
 Training recommendations are decision support, not medical advice.
-

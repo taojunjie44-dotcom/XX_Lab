@@ -1,0 +1,15 @@
+{
+  "name": "personal-vbt-athlete-monitoring-system",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Planning workspace for a local-first personal VBT athlete monitoring web application.",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "dev": "pnpm --filter @vbt/web dev",
+    "build": "pnpm --filter @vbt/web build",
+    "test": "pnpm --filter @vbt/web test"
+  },
+  "engines": {
+    "node": ">=24.19.0"
+  }
+}
