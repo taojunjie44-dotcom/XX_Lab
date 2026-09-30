@@ -4,7 +4,7 @@ import {
   Activity, BatteryCharging, CalendarDays, ChevronRight, CircleGauge, Cloud,
   ClipboardCheck, CloudOff, Database, Download, Dumbbell, FileUp, Flame, Gauge,
   HeartPulse, History, Home, Info, Menu, Moon, MoreHorizontal, Plus, RefreshCw,
-  Save, Smartphone, Sparkles, Target, Trash2, TrendingUp, Trophy, User, X, Zap, LogOut
+  Pencil, Save, Smartphone, Sparkles, Target, Trash2, TrendingUp, Trophy, User, X, Zap, LogOut
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ReferenceLine,
@@ -13,8 +13,8 @@ import {
 import { format, parseISO } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { db } from "./db";
-import { linearRegression, performanceReadiness, readinessRecommendation, readinessScore, sessionVolume } from "./lib/metrics";
-import { defaultMvtFor, exerciseGroups, vbtExercises } from "./exerciseCatalog";
+import { calibrateDailyE1RM, linearRegression, performanceReadiness, readinessRecommendation, readinessScore, sessionVolume, testProfilePoints } from "./lib/metrics";
+import { defaultMvtFor, exerciseGroups, exercises } from "./exerciseCatalog";
 import { type AthleteSettings, type ExerciseBlock, type ExerciseName, type PersonalRecord, type ReadinessEntry, type SetEntry, type TrainingSession, type TrainingType } from "./types";
 import { cacheSnapshot, cloudConfigured, normalizeAccount, pullCloud, pushCloud, readCachedSnapshot, replaceLocal, snapshotLocal, validAccount, type SyncState } from "./sync";
 
@@ -83,7 +83,7 @@ function DecimalInput({ value, onValue, ariaLabel, placeholder = "0.00", min = 0
 }
 
 function exerciseMvt(settings: AthleteSettings | undefined, exercise: string) {
-  return settings?.mvt?.[exercise] ?? defaultMvtFor(exercise);
+  return settings ? settings.mvt?.[exercise] : defaultMvtFor(exercise);
 }
 
 function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -164,7 +164,7 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
     (settings?.personalRecords ?? []).forEach((record) => {
       if (record.weight <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(record.date)) return;
       const current = best[record.exercise];
-      if (!current || record.weight > current.weight || (record.weight === current.weight && record.date > current.date)) best[record.exercise] = { weight: record.weight, date: record.date, source: "手动 PR" };
+      if (!current || record.weight > current.weight || (record.weight === current.weight && record.date > current.date)) best[record.exercise] = { weight: record.weight, velocity: record.velocity && record.velocity > 0 ? record.velocity : undefined, date: record.date, source: "手动 PR" };
     });
     return best;
   }, [sessions, settings?.personalRecords]);
@@ -289,18 +289,20 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
   return <div className="session-layout">
     <Card className="session-control"><CardHeader title={isFuture ? "制定训练计划" : "记录本次训练"} subtitle={isFuture ? "未来日期自动保存为计划，到训练日再填写完成状态、速度与时长" : "输入每组最快一次平均向心速度"} action={<span className={`session-mode ${isFuture ? "planned" : "live"}`}>{isFuture ? "未来计划" : "训练记录"}</span>} />
       <div className="form-grid three"><label><span>日期</span><input type="date" value={session.date} onChange={(e) => changeDate(e.target.value)} /></label><label><span>训练类型</span><select value={session.type} onChange={(e) => setSession({ ...session, type: e.target.value as TrainingSession["type"] })}>{trainingTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>训练时长</span>{isFuture ? <div className="deferred-field">训练结束后填写</div> : <div className="input-unit"><input type="number" min="0" placeholder="训练结束后填写" value={session.duration || ""} onChange={(e) => setSession({ ...session, duration: Number(e.target.value) })} /><em>分钟</em></div>}</label></div>
+      <div className={`profile-policy ${session.type === "测试" ? "test" : "training"}`}><Info /><div><strong>{session.type === "测试" ? "测试模式：更新长期速度画像" : "训练模式：保护长期速度画像"}</strong><span>{session.type === "测试" ? "保存后，每个动作在同一负荷下的最快有效速度会进入长期 LVP。" : "本次速度不会写入长期 LVP；仅第一个有效速度组用于校准今日 1RM。"}</span></div></div>
     </Card>
     {session.exercises.map((block, blockIndex) => {
-      const historicalPoints = sessions.filter((item) => item.completed).flatMap((item) => item.exercises.filter((candidate) => candidate.exercise === block.exercise).flatMap((candidate) => candidate.sets.filter((set) => set.completed && set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }))));
-      const currentPoints = block.sets.filter((set) => set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }));
-      const modelPoints = [...historicalPoints, ...currentPoints];
+      const historicalPoints = testProfilePoints(sessions, block.exercise, session.id);
+      const calibrationSet = isFuture ? undefined : block.sets.find((set) => set.weight > 0 && set.velocity > 0);
       const mvt = exerciseMvt(settings, block.exercise);
-      const regression = mvt && new Set(modelPoints.map((point) => point.weight)).size >= 2 ? linearRegression(modelPoints, mvt) : null;
-      const e1rm = regression && regression.estimated1RM > 0 && regression.r2 >= .5 ? regression.estimated1RM : null;
+      const regression = mvt && new Set(historicalPoints.map((point) => point.weight)).size >= 2 ? linearRegression(historicalPoints, mvt) : null;
+      const calibration = regression && regression.r2 >= .5 && mvt ? calibrateDailyE1RM(regression, mvt, calibrationSet) : null;
+      const e1rm = calibration?.estimated1RM ?? null;
+      const modelHint = !regression ? "需要测试日的至少两个不同负荷速度点" : !calibrationSet ? `测试基线 ${regression.estimated1RM.toFixed(1)}kg · 等待首个有效速度组` : calibration ? `首组 ${calibrationSet.weight}kg @ ${calibrationSet.velocity.toFixed(2)}m/s · 较基线 ${calibration.velocityDelta >= 0 ? "+" : ""}${calibration.velocityDelta.toFixed(2)}m/s` : "测试画像拟合度不足，暂不估算";
       return <Card className="exercise-card" key={block.id}>
-      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {e1rm ? `历史 ${historicalPoints.length} 点 + 本次 ${currentPoints.length} 点，输入时实时更新` : "至少需要两个不同负荷的有效速度点"}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
+      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {modelHint}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
       <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>{isFuture ? "计划" : "状态"}</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" min="0" value={set.weight || ""} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" min="0" value={set.reps || ""} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><DecimalInput ariaLabel={`第${index+1}组速度`} value={set.velocity} placeholder={isFuture ? "可留空" : "0.00"} onValue={(value) => updateSet(block.id, set.id, "velocity", value)} /><DecimalInput ariaLabel={`第${index+1}组RPE`} value={set.rpe} placeholder={isFuture ? "可留空" : "1–10"} max={10} onValue={(value) => updateSet(block.id, set.id, "rpe", value)} />{isFuture ? <span className="planned-set">待训练</span> : <label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label>}<button className="icon-button danger" onClick={() => updateBlock(block.id, (candidate) => ({ ...candidate, sets: candidate.sets.filter((item) => item.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
-      <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: [...b.sets, blankSet()] }))}><Plus />添加一组</button>
+      <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => { const previous = b.sets.at(-1); return { ...b, sets: [...b.sets, { ...blankSet(), weight: previous?.weight ?? 0, reps: previous?.reps ?? 0 }] }; })}><Plus />按上一组添加</button>
     </Card>})}
     <button className="add-exercise" onClick={() => setSession((s) => ({ ...s, exercises: [...s.exercises, blankBlock()] }))}><Plus /><span>添加训练动作</span></button>
     <Card className="session-finish"><label><span>{isFuture ? "计划备注" : "训练备注"}</span><textarea placeholder={isFuture ? "记录训练目标、重点技术或负荷安排…" : "记录技术感受、疼痛或计划调整…"} value={session.notes} onChange={(e) => setSession({ ...session, notes: e.target.value })} /></label><div><p className={message.includes("至少") || message.includes("请") ? "error" : "success"}>{message}</p><button className="btn primary" onClick={save}><Save />{isFuture ? "保存训练计划" : "完成并保存训练"}</button></div></Card>
@@ -309,18 +311,19 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
 
 function VbtPage({ sessions, settings }: { sessions: TrainingSession[]; settings?: AthleteSettings }) {
   const [exercise, setExercise] = useState<ExerciseName>("深蹲");
-  const points = useMemo(() => sessions.filter((session) => session.completed).flatMap((session) => session.exercises.filter((b) => b.exercise === exercise).flatMap((b) => b.sets.filter((s) => s.completed && s.weight > 0 && s.velocity > 0).map((s) => ({ weight: s.weight, velocity: s.velocity, date: session.date })))).sort((a,b) => a.weight - b.weight), [sessions, exercise]);
+  const points = useMemo(() => testProfilePoints(sessions, exercise), [sessions, exercise]);
+  const testDays = new Set(points.map((point) => point.date)).size;
   const mvt = exerciseMvt(settings, exercise);
   const regression = mvt ? linearRegression(points, mvt) : null;
   const lineData = regression && points.length ? [{ weight: Math.min(...points.map((p) => p.weight)) - 5, velocity: regression.slope * (Math.min(...points.map((p) => p.weight)) - 5) + regression.intercept }, { weight: regression.estimated1RM, velocity: mvt }] : [];
   return <div className="vbt-layout">
-    <Card className="profile-controls"><div><span>动作画像</span><ExerciseSelect value={exercise} onChange={setExercise} /></div><div className="profile-status"><span className="status-dot" />{!mvt ? "该动作尚未设置 MVT" : points.length >= 4 ? "画像数据充足" : "需要更多数据"}</div></Card>
-    <div className="metric-strip vbt-metrics"><Card><div className="metric-icon lime"><Trophy /></div><div><span>估算 1RM</span><strong>{regression ? regression.estimated1RM.toFixed(1) : "—"}<small> kg</small></strong><em>基于个人 LVP</em></div></Card><Card><div className="metric-icon blue"><Target /></div><div><span>最小速度阈值</span><strong>{mvt ?? "—"}<small> m/s</small></strong><em>{exercise}专属</em></div></Card><Card><div className="metric-icon amber"><CircleGauge /></div><div><span>模型拟合度</span><strong>{regression ? (regression.r2 * 100).toFixed(0) : "—"}<small>%</small></strong><em>{points.length} 个有效观测</em></div></Card></div>
-    <Card className="lvp-chart"><CardHeader title={`${exercise} 负荷–速度画像`} subtitle="每个点代表一组最快重复；虚线为个人回归趋势" />
-      {points.length >= 2 ? <div className="chart-box tall"><ResponsiveContainer width="100%" height="100%"><ScatterChart margin={{ top: 16, right: 24, left: 0, bottom: 8 }}><CartesianGrid stroke="var(--line)" strokeDasharray="3 3" /><XAxis type="number" dataKey="weight" name="负重" unit="kg" domain={["dataMin - 10", "dataMax + 15"]} tickFormatter={(value) => Math.round(value).toString()} tick={{ fill: "var(--muted)", fontSize: 12 }} /><YAxis type="number" dataKey="velocity" name="速度" unit="m/s" domain={[0, "dataMax + 0.15"]} tickFormatter={(value) => Number(value).toFixed(2)} tick={{ fill: "var(--muted)", fontSize: 12 }} /><Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(value) => typeof value === "number" ? value.toFixed(2) : value} contentStyle={{ borderRadius: 12, border: "1px solid var(--line)" }} /><Scatter name="训练组" data={points} fill="#173f31">{points.map((_, index) => <Cell key={index} fill={index === points.length - 1 ? "#98cf4f" : "#173f31"} />)}</Scatter><Line data={lineData} type="linear" dataKey="velocity" stroke="#e79545" strokeWidth={2} strokeDasharray="6 5" dot={false} activeDot={false} legendType="none" /></ScatterChart></ResponsiveContainer></div> : <EmptyState icon={TrendingUp} title="还无法建立画像" text="至少记录两组不同负重与速度数据。" />}
+    <Card className="profile-controls"><div><span>动作画像</span><ExerciseSelect value={exercise} onChange={setExercise} /></div><div className="profile-status"><span className="status-dot" />{!mvt ? "该动作尚未设置 oMVT" : points.length >= 4 ? `${testDays} 个测试日 · 画像可用` : "等待测试日数据"}</div></Card>
+    <div className="metric-strip vbt-metrics"><Card><div className="metric-icon lime"><Trophy /></div><div><span>基线估算 1RM</span><strong>{regression ? regression.estimated1RM.toFixed(1) : "—"}<small> kg</small></strong><em>仅基于测试日 LVP</em></div></Card><Card><div className="metric-icon blue"><Target /></div><div><span>oMVT</span><strong>{mvt ?? "—"}<small> m/s</small></strong><em>{exercise}专属</em></div></Card><Card><div className="metric-icon amber"><CircleGauge /></div><div><span>模型拟合度</span><strong>{regression ? (regression.r2 * 100).toFixed(0) : "—"}<small>%</small></strong><em>{testDays} 个测试日 · {points.length} 个点</em></div></Card></div>
+    <Card className="lvp-chart"><CardHeader title={`${exercise} 测试负荷–速度画像`} subtitle="仅纳入测试日数据；同日同负荷只保留最快速度" />
+      {points.length >= 2 ? <div className="chart-box tall"><ResponsiveContainer width="100%" height="100%"><ScatterChart margin={{ top: 16, right: 24, left: 0, bottom: 8 }}><CartesianGrid stroke="var(--line)" strokeDasharray="3 3" /><XAxis type="number" dataKey="weight" name="负重" unit="kg" domain={["dataMin - 10", "dataMax + 15"]} tickFormatter={(value) => Math.round(value).toString()} tick={{ fill: "var(--muted)", fontSize: 12 }} /><YAxis type="number" dataKey="velocity" name="速度" unit="m/s" domain={[0, "dataMax + 0.15"]} tickFormatter={(value) => Number(value).toFixed(2)} tick={{ fill: "var(--muted)", fontSize: 12 }} /><Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(value) => typeof value === "number" ? value.toFixed(2) : value} contentStyle={{ borderRadius: 12, border: "1px solid var(--line)" }} /><Scatter name="测试组" data={points} fill="#173f31">{points.map((_, index) => <Cell key={index} fill={index === points.length - 1 ? "#98cf4f" : "#173f31"} />)}</Scatter><Line data={lineData} type="linear" dataKey="velocity" stroke="#e79545" strokeWidth={2} strokeDasharray="6 5" dot={false} activeDot={false} legendType="none" /></ScatterChart></ResponsiveContainer></div> : <EmptyState icon={TrendingUp} title="还无法建立测试画像" text="把训练类型设为“测试”，至少记录两个不同负荷的有效速度。" />}
     </Card>
-    <Card className="prediction-card"><CardHeader title="今日负重预测" subtitle="根据当前个人回归模型估算" />{regression ? <div className="prediction-list">{[0.6,0.5,0.4,0.3].map((velocity) => { const weight = (velocity-regression.intercept)/regression.slope; return <div key={velocity}><span>{velocity.toFixed(2)} m/s</span><div className="prediction-line"><i style={{ width: `${Math.max(20, Math.min(100, weight/regression.estimated1RM*100))}%` }} /></div><strong>{weight.toFixed(0)} kg</strong></div>})}</div> : <p className="muted-copy">记录更多训练数据后显示。</p>}</Card>
-    <Card className="model-note"><Zap /><div><strong>模型解释</strong><p>e1RM 由个人负荷–速度直线与 MVT 的交点估算。这里只作为训练决策辅助，不替代实际测试；当 R² 低于 0.80 时建议补充不同负荷区间的数据。</p></div></Card>
+    <Card className="prediction-card"><CardHeader title="基线负重预测" subtitle="根据测试日个人回归模型估算" />{regression ? <div className="prediction-list">{[0.6,0.5,0.4,0.3].map((velocity) => { const weight = (velocity-regression.intercept)/regression.slope; return <div key={velocity}><span>{velocity.toFixed(2)} m/s</span><div className="prediction-line"><i style={{ width: `${Math.max(20, Math.min(100, weight/regression.estimated1RM*100))}%` }} /></div><strong>{weight.toFixed(0)} kg</strong></div>})}</div> : <p className="muted-copy">完成测试日数据后显示。</p>}</Card>
+    <Card className="model-note"><Zap /><div><strong>两层模型</strong><p>长期 LVP 只由测试日更新；普通训练的第一个有效速度组只平移当天曲线、估算今日 1RM，不会污染长期基线。后续疲劳组不会参与今日 1RM 计算。</p></div></Card>
   </div>;
 }
 
@@ -338,40 +341,41 @@ function HistoryPage({ sessions, readiness, onChanged }: { sessions: TrainingSes
 
 function DataPage({ settings, onChanged, cloudEnabled }: { settings?: AthleteSettings; onChanged: () => void; cloudEnabled: boolean }) {
   const [form, setForm] = useState<AthleteSettings | undefined>(settings);
+  const [editingProfile, setEditingProfile] = useState(false);
   const [status, setStatus] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   useEffect(() => setForm(settings), [settings]);
   if (!form) return null;
   const personalRecords = form.personalRecords ?? [];
-  const addPersonalRecord = () => setForm({
-    ...form,
-    personalRecords: [...personalRecords, { id: uid(), exercise: "深蹲", weight: 0, date: today(), notes: "" }]
-  });
-  const updatePersonalRecord = (id: string, patch: Partial<PersonalRecord>) => setForm({
-    ...form,
-    personalRecords: personalRecords.map((record) => record.id === id ? { ...record, ...patch } : record)
-  });
+  const omvtEntries = Object.entries(form.mvt).sort(([a], [b]) => a.localeCompare(b, "zh-CN"));
+  const persistSettings = async (message: string) => { await db.settings.put(form); onChanged(); setStatus(message); };
+  const addOmvt = () => { const exercise = exercises.find((item) => !(item in form.mvt)); if (!exercise) return; setForm({ ...form, mvt: { ...form.mvt, [exercise]: defaultMvtFor(exercise) ?? 0 } }); };
+  const renameOmvt = (previous: string, next: string) => { const mvt = { ...form.mvt }; const value = mvt[previous]; delete mvt[previous]; mvt[next] = mvt[next] ?? value; setForm({ ...form, mvt }); };
+  const removeOmvt = (exercise: string) => { const mvt = { ...form.mvt }; delete mvt[exercise]; setForm({ ...form, mvt }); };
+  const addPersonalRecord = () => setForm({ ...form, personalRecords: [...personalRecords, { id: uid(), exercise: "深蹲", weight: 0, velocity: 0, date: today(), notes: "" }] });
+  const updatePersonalRecord = (id: string, patch: Partial<PersonalRecord>) => setForm({ ...form, personalRecords: personalRecords.map((record) => record.id === id ? { ...record, ...patch } : record) });
   const removePersonalRecord = (id: string) => setForm({ ...form, personalRecords: personalRecords.filter((record) => record.id !== id) });
-  const saveSettings = async () => { await db.settings.put(form); onChanged(); setStatus("设置已保存并等待同步"); };
   const exportJson = async () => { const payload = { version: 1, exportedAt: new Date().toISOString(), sessions: await db.sessions.toArray(), readiness: await db.readiness.toArray(), settings: await db.settings.toArray() }; download(`velocity-lab-${today()}.json`, JSON.stringify(payload, null, 2), "application/json"); };
   const exportCsv = async () => { const rows = [["date","session_type","exercise","set","weight","reps","velocity","rpe","volume"]]; (await db.sessions.toArray()).forEach((s) => s.exercises.forEach((b) => b.sets.forEach((set,i) => rows.push([s.date,s.type,b.exercise,String(i+1),String(set.weight),String(set.reps),String(set.velocity),String(set.rpe),String(set.weight*set.reps)])))); download(`velocity-lab-sets-${today()}.csv`, rows.map((r) => r.join(",")).join("\n"), "text/csv"); };
   const importJson = async (file?: File) => { if (!file) return; try { const payload = JSON.parse(await file.text()); if (!Array.isArray(payload.sessions) || !Array.isArray(payload.readiness)) throw new Error(); await db.transaction("rw", db.sessions, db.readiness, db.settings, async () => { await db.sessions.clear(); await db.readiness.clear(); if (payload.sessions.length) await db.sessions.bulkAdd(payload.sessions); if (payload.readiness.length) await db.readiness.bulkAdd(payload.readiness); if (payload.settings?.length) await db.settings.bulkPut(payload.settings); }); onChanged(); setStatus("数据导入完成并等待同步"); } catch { setStatus("导入失败：文件格式不正确"); } };
   const clearData = async () => { if (!window.confirm("这会删除所有训练与状态记录。请先导出备份，确定继续吗？")) return; await db.sessions.clear(); await db.readiness.clear(); onChanged(); setStatus("训练数据已清空并等待同步"); };
-  return <div className="data-layout"><Card><CardHeader title="运动员档案" subtitle="用于个体化计算与界面显示" /><div className="form-grid three"><label><span>姓名</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label><span>体重</span><div className="input-unit"><input type="number" step="0.1" value={form.bodyWeight} onChange={(e) => setForm({ ...form, bodyWeight: Number(e.target.value) })} /><em>kg</em></div></label><label><span>单位</span><select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as "kg" | "lb" })}><option value="kg">公斤 kg</option><option value="lb">磅 lb</option></select></label></div><button className="btn primary" onClick={saveSettings}><Save />保存档案</button></Card>
-    <Card><CardHeader title="动作 MVT" subtitle="用于个人负荷–速度曲线与 e1RM；仅显示适合 VBT 建模的动作" /><div className="mvt-grid">{vbtExercises.map((item) => <label key={item.name}><span>{item.name}</span><div className="input-unit"><input type="number" step="0.01" value={form.mvt[item.name] ?? item.defaultMvt ?? ""} onChange={(e) => setForm({ ...form, mvt: { ...form.mvt, [item.name]: Number(e.target.value) } })} /><em>m/s</em></div></label>)}</div><button className="btn primary" onClick={saveSettings}><Save />保存阈值</button></Card>
-    <Card className="pr-card"><CardHeader title="个人 PR 时间线" subtitle="可为同一个动作记录多次突破与对应日期" action={<button className="btn ghost compact" onClick={addPersonalRecord}><Plus />添加 PR</button>} />
-      <div className="pr-list">{personalRecords.length ? personalRecords.map((record, index) => <div className="pr-row" key={record.id}>
-        <div className="pr-index"><Trophy /><span>PR {index + 1}</span></div>
-        <label><span>动作</span><ExerciseSelect value={record.exercise} onChange={(exercise) => updatePersonalRecord(record.id, { exercise: exercise as ExerciseName })} /></label>
-        <label><span>成绩</span><div className="input-unit"><DecimalInput value={record.weight} onValue={(weight) => updatePersonalRecord(record.id, { weight })} ariaLabel={`${record.exercise} PR 重量`} placeholder="0" /><em>{form.unit}</em></div></label>
-        <label><span>日期</span><input type="date" value={record.date} onChange={(event) => updatePersonalRecord(record.id, { date: event.target.value })} /></label>
-        <label><span>备注（可选）</span><input value={record.notes ?? ""} placeholder="例如：比赛 / 训练" onChange={(event) => updatePersonalRecord(record.id, { notes: event.target.value })} /></label>
-        <button className="remove-pr" onClick={() => removePersonalRecord(record.id)} aria-label={`删除 ${record.exercise} PR`}><Trash2 /></button>
-      </div>) : <EmptyState icon={Trophy} title="还没有 PR 记录" text="点击“添加 PR”，建立属于你的个人最好成绩时间线。" />}</div>
-      {personalRecords.length > 0 && <button className="btn primary" onClick={saveSettings}><Save />保存 PR 记录</button>}
+  return <div className="data-layout">
+    <Card className="profile-card"><CardHeader title="运动员档案" subtitle="基础信息仅在主动编辑时开放" action={!editingProfile && <button className="btn ghost compact" onClick={() => setEditingProfile(true)}><Pencil />修改档案</button>} />
+      {editingProfile ? <><div className="form-grid profile-form"><label><span>姓名</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label><label><span>体重</span><div className="input-unit"><DecimalInput value={form.bodyWeight} onValue={(bodyWeight) => setForm({ ...form, bodyWeight })} ariaLabel="体重" /><em>{form.unit}</em></div></label><label><span>身高</span><div className="input-unit"><DecimalInput value={form.heightCm ?? 0} onValue={(heightCm) => setForm({ ...form, heightCm })} ariaLabel="身高" placeholder="未填写" /><em>cm</em></div></label><label><span>出生日期</span><input type="date" value={form.birthDate ?? ""} onChange={(event) => setForm({ ...form, birthDate: event.target.value })} /></label><label><span>主要项目</span><input value={form.sport ?? ""} placeholder="例如：举重" onChange={(event) => setForm({ ...form, sport: event.target.value })} /></label><label><span>系统训练年限</span><div className="input-unit"><DecimalInput value={form.trainingYears ?? 0} onValue={(trainingYears) => setForm({ ...form, trainingYears })} ariaLabel="系统训练年限" placeholder="未填写" /><em>年</em></div></label><label><span>惯用侧</span><select value={form.dominantSide ?? "双侧"} onChange={(event) => setForm({ ...form, dominantSide: event.target.value as AthleteSettings["dominantSide"] })}><option>左侧</option><option>右侧</option><option>双侧</option></select></label><label><span>重量单位</span><select value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value as "kg" | "lb" })}><option value="kg">公斤 kg</option><option value="lb">磅 lb</option></select></label></div><div className="form-actions"><button className="btn primary" onClick={async () => { await persistSettings("运动员档案已保存"); setEditingProfile(false); }}><Save />保存档案</button><button className="btn ghost" onClick={() => { setForm(settings); setEditingProfile(false); }}><X />取消</button></div></> : <div className="profile-summary">{[
+        ["姓名", form.name || "—"], ["体重", `${form.bodyWeight || "—"} ${form.unit}`], ["身高", form.heightCm ? `${form.heightCm} cm` : "未填写"], ["出生日期", form.birthDate || "未填写"], ["主要项目", form.sport || "未填写"], ["训练年限", form.trainingYears ? `${form.trainingYears} 年` : "未填写"], ["惯用侧", form.dominantSide || "未填写"]
+      ].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>}
+    </Card>
+    <Card className="omvt-card"><CardHeader title="动作 oMVT" subtitle="只维护你实际使用的动作与个体最低速度阈值" action={<button className="btn ghost compact" onClick={addOmvt}><Plus />添加动作</button>} />
+      <div className="omvt-list"><div className="omvt-head"><span>动作</span><span>oMVT</span><span /></div>{omvtEntries.map(([exercise, value]) => <div className="omvt-row" key={exercise}><ExerciseSelect value={exercise} onChange={(next) => renameOmvt(exercise, next)} /><div className="input-unit"><DecimalInput value={value} onValue={(next) => setForm({ ...form, mvt: { ...form.mvt, [exercise]: next } })} ariaLabel={`${exercise} oMVT`} /><em>m/s</em></div><button className="remove-pr" onClick={() => removeOmvt(exercise)} aria-label={`删除 ${exercise} oMVT`}><Trash2 /></button></div>)}</div>
+      <button className="btn primary" onClick={() => persistSettings("oMVT 已保存")}><Save />保存 oMVT</button>
+    </Card>
+    <Card className="pr-card"><CardHeader title="个人 PR 时间线" subtitle="紧凑记录成绩、速度、日期和备注；同一动作可记录多次" action={<button className="btn ghost compact" onClick={addPersonalRecord}><Plus />添加 PR</button>} />
+      {personalRecords.length ? <div className="pr-table-wrap"><div className="pr-table"><div className="pr-table-head"><span>动作</span><span>成绩</span><span>速度</span><span>日期</span><span>备注</span><span /></div>{personalRecords.map((record) => <div className="pr-table-row" key={record.id}><ExerciseSelect value={record.exercise} onChange={(exercise) => updatePersonalRecord(record.id, { exercise })} /><div className="input-unit"><DecimalInput value={record.weight} onValue={(weight) => updatePersonalRecord(record.id, { weight })} ariaLabel={`${record.exercise} PR 重量`} placeholder="0" /><em>{form.unit}</em></div><div className="input-unit"><DecimalInput value={record.velocity ?? 0} onValue={(velocity) => updatePersonalRecord(record.id, { velocity })} ariaLabel={`${record.exercise} PR 速度`} placeholder="可留空" /><em>m/s</em></div><input aria-label={`${record.exercise} PR 日期`} type="date" value={record.date} onChange={(event) => updatePersonalRecord(record.id, { date: event.target.value })} /><input aria-label={`${record.exercise} PR 备注`} value={record.notes ?? ""} placeholder="比赛 / 训练" onChange={(event) => updatePersonalRecord(record.id, { notes: event.target.value })} /><button className="remove-pr" onClick={() => removePersonalRecord(record.id)} aria-label={`删除 ${record.exercise} PR`}><Trash2 /></button></div>)}</div></div> : <div className="pr-empty"><Trophy /><div><strong>还没有 PR 记录</strong><span>添加后会以紧凑表格形式展示。</span></div></div>}
+      {personalRecords.length > 0 && <button className="btn primary" onClick={() => persistSettings("PR 时间线已保存")}><Save />保存 PR 记录</button>}
     </Card>
     <Card><CardHeader title="备份与迁移" subtitle="建议每周导出一次完整 JSON 备份" /><div className="data-actions"><button className="btn primary" onClick={exportJson}><Download />导出完整备份</button><button className="btn ghost" onClick={exportCsv}><Download />导出训练 CSV</button><button className="btn ghost" onClick={() => fileRef.current?.click()}><FileUp />导入 JSON</button><input ref={fileRef} hidden type="file" accept="application/json" onChange={(e) => importJson(e.target.files?.[0])} /></div><div className="local-note">{cloudEnabled ? <Cloud /> : <CloudOff />}<div><strong>{cloudEnabled ? "本地优先 + 云端同步" : "仅本地模式"}</strong><span>{cloudEnabled ? "修改会自动同步，离线时仍可继续记录。" : "配置 Supabase 后启用跨设备同步。"}</span></div></div></Card>
-    <Card className="danger-zone"><CardHeader title="危险操作" subtitle="清空后只能通过此前导出的 JSON 恢复" /><button className="btn danger-outline" onClick={clearData}><Trash2 />清空训练与状态数据</button></Card>{status && <div className="toast" role="status">{status}</div>}</div>;
+    <Card className="danger-zone"><CardHeader title="危险操作" subtitle="清空后只能通过此前导出的 JSON 恢复" /><button className="btn danger-outline" onClick={clearData}><Trash2 />清空训练与状态数据</button></Card>{status && <div className="toast" role="status">{status}</div>}
+  </div>;
 }
 
 function download(filename: string, content: string, type: string) {
@@ -384,6 +388,11 @@ function defaultSettings(account: string): AthleteSettings {
     id: "athlete",
     name: account,
     bodyWeight: 75,
+    heightCm: 0,
+    birthDate: "",
+    sport: "",
+    trainingYears: 0,
+    dominantSide: "双侧",
     unit: "kg",
     theme: "light",
     mvt: { 深蹲: 0.3, 杠铃卧推: 0.17, 传统硬拉: 0.15, 全程高抓: 1.7, 全程高翻: 1.3 },

@@ -1,4 +1,4 @@
-import type { ReadinessEntry, SetEntry } from "../types";
+import type { ReadinessEntry, SetEntry, TrainingSession } from "../types";
 
 export function velocityLoss(sets: Pick<SetEntry, "velocity">[]): number {
   const valid = sets.map((set) => set.velocity).filter((value) => value > 0);
@@ -69,6 +69,42 @@ export function linearRegression(points: { weight: number; velocity: number }[],
   return { slope, intercept, r2, estimated1RM };
 }
 
+export interface VelocityProfilePoint {
+  weight: number;
+  velocity: number;
+  date: string;
+}
+
+export function testProfilePoints(sessions: TrainingSession[], exercise: string, excludeSessionId?: number): VelocityProfilePoint[] {
+  return sessions
+    .filter((session) => session.completed && session.type === "测试" && session.id !== excludeSessionId)
+    .flatMap((session) => {
+      const fastestByWeight = new Map<number, number>();
+      session.exercises.filter((block) => block.exercise === exercise).forEach((block) => block.sets.forEach((set) => {
+        if (!set.completed || set.weight <= 0 || set.velocity <= 0) return;
+        fastestByWeight.set(set.weight, Math.max(fastestByWeight.get(set.weight) ?? 0, set.velocity));
+      }));
+      return [...fastestByWeight].map(([weight, velocity]) => ({ weight, velocity, date: session.date }));
+    })
+    .sort((a, b) => a.weight - b.weight || a.date.localeCompare(b.date));
+}
+
+export interface DailyE1RMCalibration {
+  estimated1RM: number;
+  expectedVelocity: number;
+  velocityDelta: number;
+}
+
+export function calibrateDailyE1RM(regression: RegressionResult | null, mvt: number, point?: { weight: number; velocity: number }): DailyE1RMCalibration | null {
+  if (!regression || regression.slope >= 0 || !point || point.weight <= 0 || point.velocity <= 0) return null;
+  const expectedVelocity = regression.slope * point.weight + regression.intercept;
+  const velocityDelta = point.velocity - expectedVelocity;
+  const estimated1RM = (mvt - (regression.intercept + velocityDelta)) / regression.slope;
+  if (!Number.isFinite(estimated1RM) || estimated1RM <= 0) return null;
+  return { estimated1RM, expectedVelocity, velocityDelta };
+}
+
 export function sessionVolume(session: { exercises: { sets: Pick<SetEntry, "weight" | "reps" | "completed">[] }[] }): number {
   return session.exercises.flatMap((exercise) => exercise.sets).filter((set) => set.completed).reduce((sum, set) => sum + set.weight * set.reps, 0);
 }
+

@@ -50,6 +50,11 @@ export interface AthleteSettings {
   id: string;
   name: string;
   bodyWeight: number;
+  heightCm?: number;
+  birthDate?: string;
+  sport?: string;
+  trainingYears?: number;
+  dominantSide?: "左侧" | "右侧" | "双侧";
   unit: "kg" | "lb";
   theme: "light" | "dark" | "system";
   mvt: Record<string, number>;
@@ -60,6 +65,7 @@ export interface PersonalRecord {
   id: string;
   exercise: ExerciseName;
   weight: number;
+  velocity?: number;
   date: string;
   notes?: string;
 }
