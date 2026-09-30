@@ -15,7 +15,7 @@ import { zhCN } from "date-fns/locale";
 import { db } from "./db";
 import { linearRegression, performanceReadiness, readinessRecommendation, readinessScore, sessionVolume } from "./lib/metrics";
 import { defaultMvtFor, exerciseGroups, vbtExercises } from "./exerciseCatalog";
-import { type AthleteSettings, type ExerciseBlock, type ExerciseName, type ReadinessEntry, type SetEntry, type TrainingSession, type TrainingType } from "./types";
+import { type AthleteSettings, type ExerciseBlock, type ExerciseName, type PersonalRecord, type ReadinessEntry, type SetEntry, type TrainingSession, type TrainingType } from "./types";
 import { cacheSnapshot, cloudConfigured, normalizeAccount, pullCloud, pushCloud, readCachedSnapshot, replaceLocal, snapshotLocal, validAccount, type SyncState } from "./sync";
 
 type Page = "dashboard" | "readiness" | "session" | "vbt" | "history" | "data";
@@ -35,11 +35,49 @@ const uid = () => crypto.randomUUID();
 const trainingTypes: TrainingType[] = ["下肢力量", "上肢力量", "全身力量", "举重技术", "速度力量", "增强式", "体能", "测试", "恢复", "其他"];
 
 function ExerciseSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <select value={value} onChange={(event) => onChange(event.target.value)}>
-    {exerciseGroups.map((group) => <optgroup key={group.category} label={group.category}>
-      {group.exercises.map((exercise) => <option key={`${group.category}-${exercise.name}`} value={exercise.name}>{exercise.name}</option>)}
-    </optgroup>)}
-  </select>;
+  const groupForValue = exerciseGroups.find((group) => group.exercises.some((exercise) => exercise.name === value)) ?? exerciseGroups[0];
+  const [category, setCategory] = useState(groupForValue.category);
+  useEffect(() => setCategory(groupForValue.category), [groupForValue.category]);
+  const group = exerciseGroups.find((item) => item.category === category) ?? exerciseGroups[0];
+  return <div className="exercise-picker">
+    <select aria-label="动作类别" value={group.category} onChange={(event) => { const next = exerciseGroups.find((item) => item.category === event.target.value) ?? exerciseGroups[0]; setCategory(next.category); onChange(next.exercises[0].name); }}>
+      {exerciseGroups.map((item) => <option key={item.category} value={item.category}>{item.category}</option>)}
+    </select>
+    <select aria-label="训练动作" value={group.exercises.some((exercise) => exercise.name === value) ? value : group.exercises[0].name} onChange={(event) => onChange(event.target.value)}>
+      {group.exercises.map((exercise) => <option key={exercise.name} value={exercise.name}>{exercise.name}</option>)}
+    </select>
+  </div>;
+}
+
+function DecimalInput({ value, onValue, ariaLabel, placeholder = "0.00", min = 0, max }: { value: number; onValue: (value: number) => void; ariaLabel: string; placeholder?: string; min?: number; max?: number }) {
+  const [draft, setDraft] = useState(value > 0 ? String(value) : "");
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value > 0 ? String(value) : ""); }, [value]);
+  return <input
+    aria-label={ariaLabel}
+    type="text"
+    inputMode="decimal"
+    placeholder={placeholder}
+    value={draft}
+    onFocus={() => { focused.current = true; }}
+    onChange={(event) => {
+      const next = event.target.value.replace(",", ".");
+      if (!/^\d*(\.\d*)?$/.test(next)) return;
+      setDraft(next);
+      if (next === "" || next === ".") onValue(0);
+      else {
+        const parsed = Number(next);
+        if (Number.isFinite(parsed)) onValue(Math.min(max ?? parsed, Math.max(min, parsed)));
+      }
+    }}
+    onBlur={() => {
+      focused.current = false;
+      const parsed = Number(draft);
+      const normalized = Number.isFinite(parsed) ? Math.min(max ?? parsed, Math.max(min, parsed)) : 0;
+      onValue(normalized);
+      setDraft(normalized > 0 ? String(normalized) : "");
+    }}
+  />;
 }
 
 function exerciseMvt(settings: AthleteSettings | undefined, exercise: string) {
@@ -114,13 +152,20 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
   const trend = [...readiness].reverse().slice(-7).map((r) => ({ date: format(parseISO(r.date), "M/d"), score: r.score, hrv: r.hrv }));
   const weeklySessions = sessions.filter((s) => s.completed && (Date.now() - parseISO(s.date).getTime()) / 86400000 >= 0 && (Date.now() - parseISO(s.date).getTime()) / 86400000 < 7);
   const weeklyVolume = weeklySessions.reduce((sum, s) => sum + sessionVolume(s), 0);
-  const prs = useMemo(() => {
-    const best: Partial<Record<ExerciseName, number>> = {};
-    sessions.forEach((session) => session.exercises.forEach((block) => block.sets.forEach((set) => {
-      if (set.completed) best[block.exercise] = Math.max(best[block.exercise] || 0, set.weight);
+  const performanceByExercise = useMemo(() => {
+    const best: Record<string, { weight: number; velocity?: number; date: string; source: "训练记录" | "手动 PR" }> = {};
+    sessions.filter((session) => session.completed).forEach((session) => session.exercises.forEach((block) => block.sets.forEach((set) => {
+      if (!set.completed || set.weight <= 0) return;
+      const current = best[block.exercise];
+      if (!current || set.weight > current.weight || (set.weight === current.weight && session.date > current.date)) best[block.exercise] = { weight: set.weight, velocity: set.velocity > 0 ? set.velocity : undefined, date: session.date, source: "训练记录" };
     })));
+    (settings?.personalRecords ?? []).forEach((record) => {
+      const current = best[record.exercise];
+      if (!current || record.weight > current.weight || (record.weight === current.weight && record.date > current.date)) best[record.exercise] = { weight: record.weight, date: record.date, source: "手动 PR" };
+    });
     return best;
-  }, [sessions]);
+  }, [sessions, settings?.personalRecords]);
+  const performanceRows = Object.entries(performanceByExercise).sort((a, b) => b[1].date.localeCompare(a[1].date)).slice(0, 3);
   return <div className="page-grid dashboard-grid">
     <Card className="readiness-hero">
       <div className="hero-copy"><div className="kicker"><Sparkles /> GOOD MORNING, {settings?.name?.toUpperCase() || "ATHLETE"}</div><h2>今天的身体已经准备好训练。</h2><p>{latest?.recommendation || "完成今日状态评估后获得建议。"}</p><div className="hero-actions"><button className="btn primary" onClick={() => go("session")}><Dumbbell />开始训练</button><button className="btn ghost" onClick={() => go("readiness")}><ClipboardCheck />更新状态</button></div></div>
@@ -131,7 +176,7 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
       <Card><div className="metric-icon lime"><HeartPulse /></div><div><span>HRV</span><strong>{latest?.hrv || "—"}<small> ms</small></strong><em>接近个人基线</em></div></Card>
       <Card><div className="metric-icon blue"><Moon /></div><div><span>睡眠</span><strong>{latest?.sleepHours || "—"}<small> h</small></strong><em>质量 {latest?.sleepQuality || "—"}/5</em></div></Card>
       <Card><div className="metric-icon amber"><Flame /></div><div><span>7日训练量</span><strong>{Math.round(weeklyVolume / 100) / 10}<small> t</small></strong><em>{weeklySessions.length} 次训练</em></div></Card>
-      <Card><div className="metric-icon violet"><Trophy /></div><div><span>本期最佳</span><strong>{prs.深蹲 || "—"}<small> kg</small></strong><em>深蹲负重</em></div></Card>
+      <Card><div className="metric-icon violet"><Trophy /></div><div><span>深蹲最佳</span><strong>{performanceByExercise.深蹲?.weight || "—"}<small> kg</small></strong><em>{performanceByExercise.深蹲 ? fmtDate(performanceByExercise.深蹲.date) : "尚无记录"}</em></div></Card>
     </div>
 
     <Card className="trend-card">
@@ -150,9 +195,9 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
 
     <Card className="performance-card">
       <CardHeader title="能力快照" subtitle="近期最佳表现" action={<button className="text-button" onClick={() => go("vbt")}>查看画像 <ChevronRight /></button>} />
-      <div className="performance-list">
-        {[{ name: "深蹲", value: prs.深蹲, velocity: "0.39 m/s", tone: "lime" }, { name: "卧推", value: prs.卧推, velocity: "0.31 m/s", tone: "blue" }, { name: "高抓", value: prs.高抓, velocity: "1.96 m/s", tone: "amber" }].map((item, i) => <div className="performance-row" key={item.name}><div className={`rank ${item.tone}`}>{i + 1}</div><div><strong>{item.name}</strong><span>近期最佳组</span></div><div className="perf-value"><strong>{item.value || "—"}<small> kg</small></strong><span>{item.velocity}</span></div></div>)}
-      </div>
+      {performanceRows.length ? <div className="performance-list">
+        {performanceRows.map(([name, item], i) => <div className="performance-row" key={name}><div className={`rank ${["lime", "blue", "amber"][i]}`}>{i + 1}</div><div><strong>{name}</strong><span>{item.source} · {fmtDate(item.date)}</span></div><div className="perf-value"><strong>{item.weight}<small> kg</small></strong><span>{item.velocity ? `${item.velocity.toFixed(2)} m/s` : "PR 记录"}</span></div></div>)}
+      </div> : <EmptyState icon={Trophy} title="暂无能力记录" text="保存训练或在运动员档案中添加 PR 后显示。" />}
     </Card>
 
     <Card className="recent-card">
@@ -227,12 +272,14 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
     </Card>
     {session.exercises.map((block, blockIndex) => {
       const historicalPoints = sessions.filter((item) => item.completed).flatMap((item) => item.exercises.filter((candidate) => candidate.exercise === block.exercise).flatMap((candidate) => candidate.sets.filter((set) => set.completed && set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }))));
+      const currentPoints = block.sets.filter((set) => set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }));
+      const modelPoints = [...historicalPoints, ...currentPoints];
       const mvt = exerciseMvt(settings, block.exercise);
-      const regression = mvt && new Set(historicalPoints.map((point) => point.weight)).size >= 2 ? linearRegression(historicalPoints, mvt) : null;
+      const regression = mvt && new Set(modelPoints.map((point) => point.weight)).size >= 2 ? linearRegression(modelPoints, mvt) : null;
       const e1rm = regression && regression.estimated1RM > 0 && regression.r2 >= .5 ? regression.estimated1RM : null;
       return <Card className="exercise-card" key={block.id}>
-      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {e1rm ? `基于 ${historicalPoints.length} 个历史速度点` : "历史 LVP 数据不足或未设置 MVT"}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
-      <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>{isFuture ? "计划" : "状态"}</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" min="0" value={set.weight || ""} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" min="0" value={set.reps || ""} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><input aria-label={`第${index+1}组速度`} type="number" step="0.01" min="0" placeholder={isFuture ? "可留空" : "0.00"} value={set.velocity || ""} onChange={(e) => updateSet(block.id, set.id, "velocity", Number(e.target.value))} /><input aria-label={`第${index+1}组RPE`} type="number" step="0.5" min="0" max="10" placeholder={isFuture ? "可留空" : "1–10"} value={set.rpe || ""} onChange={(e) => updateSet(block.id, set.id, "rpe", Number(e.target.value))} />{isFuture ? <span className="planned-set">待训练</span> : <label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label>}<button className="icon-button danger" onClick={() => updateBlock(block.id, (candidate) => ({ ...candidate, sets: candidate.sets.filter((item) => item.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
+      <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {e1rm ? `历史 ${historicalPoints.length} 点 + 本次 ${currentPoints.length} 点，输入时实时更新` : "至少需要两个不同负荷的有效速度点"}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
+      <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>{isFuture ? "计划" : "状态"}</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" min="0" value={set.weight || ""} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" min="0" value={set.reps || ""} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><DecimalInput ariaLabel={`第${index+1}组速度`} value={set.velocity} placeholder={isFuture ? "可留空" : "0.00"} onValue={(value) => updateSet(block.id, set.id, "velocity", value)} /><DecimalInput ariaLabel={`第${index+1}组RPE`} value={set.rpe} placeholder={isFuture ? "可留空" : "1–10"} max={10} onValue={(value) => updateSet(block.id, set.id, "rpe", value)} />{isFuture ? <span className="planned-set">待训练</span> : <label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label>}<button className="icon-button danger" onClick={() => updateBlock(block.id, (candidate) => ({ ...candidate, sets: candidate.sets.filter((item) => item.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
       <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: [...b.sets, { ...blankSet(), weight: b.sets.at(-1)?.weight || 100 }] }))}><Plus />添加一组</button>
     </Card>})}
     <button className="add-exercise" onClick={() => setSession((s) => ({ ...s, exercises: [...s.exercises, blankBlock()] }))}><Plus /><span>添加训练动作</span></button>
@@ -275,6 +322,16 @@ function DataPage({ settings, onChanged, cloudEnabled }: { settings?: AthleteSet
   const fileRef = useRef<HTMLInputElement>(null);
   useEffect(() => setForm(settings), [settings]);
   if (!form) return null;
+  const personalRecords = form.personalRecords ?? [];
+  const addPersonalRecord = () => setForm({
+    ...form,
+    personalRecords: [...personalRecords, { id: uid(), exercise: "深蹲", weight: 0, date: today(), notes: "" }]
+  });
+  const updatePersonalRecord = (id: string, patch: Partial<PersonalRecord>) => setForm({
+    ...form,
+    personalRecords: personalRecords.map((record) => record.id === id ? { ...record, ...patch } : record)
+  });
+  const removePersonalRecord = (id: string) => setForm({ ...form, personalRecords: personalRecords.filter((record) => record.id !== id) });
   const saveSettings = async () => { await db.settings.put(form); onChanged(); setStatus("设置已保存并等待同步"); };
   const exportJson = async () => { const payload = { version: 1, exportedAt: new Date().toISOString(), sessions: await db.sessions.toArray(), readiness: await db.readiness.toArray(), settings: await db.settings.toArray() }; download(`velocity-lab-${today()}.json`, JSON.stringify(payload, null, 2), "application/json"); };
   const exportCsv = async () => { const rows = [["date","session_type","exercise","set","weight","reps","velocity","rpe","volume"]]; (await db.sessions.toArray()).forEach((s) => s.exercises.forEach((b) => b.sets.forEach((set,i) => rows.push([s.date,s.type,b.exercise,String(i+1),String(set.weight),String(set.reps),String(set.velocity),String(set.rpe),String(set.weight*set.reps)])))); download(`velocity-lab-sets-${today()}.csv`, rows.map((r) => r.join(",")).join("\n"), "text/csv"); };
@@ -282,6 +339,17 @@ function DataPage({ settings, onChanged, cloudEnabled }: { settings?: AthleteSet
   const clearData = async () => { if (!window.confirm("这会删除所有训练与状态记录。请先导出备份，确定继续吗？")) return; await db.sessions.clear(); await db.readiness.clear(); onChanged(); setStatus("训练数据已清空并等待同步"); };
   return <div className="data-layout"><Card><CardHeader title="运动员档案" subtitle="用于个体化计算与界面显示" /><div className="form-grid three"><label><span>姓名</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label><label><span>体重</span><div className="input-unit"><input type="number" step="0.1" value={form.bodyWeight} onChange={(e) => setForm({ ...form, bodyWeight: Number(e.target.value) })} /><em>kg</em></div></label><label><span>单位</span><select value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value as "kg" | "lb" })}><option value="kg">公斤 kg</option><option value="lb">磅 lb</option></select></label></div><button className="btn primary" onClick={saveSettings}><Save />保存档案</button></Card>
     <Card><CardHeader title="动作 MVT" subtitle="用于个人负荷–速度曲线与 e1RM；仅显示适合 VBT 建模的动作" /><div className="mvt-grid">{vbtExercises.map((item) => <label key={item.name}><span>{item.name}</span><div className="input-unit"><input type="number" step="0.01" value={form.mvt[item.name] ?? item.defaultMvt ?? ""} onChange={(e) => setForm({ ...form, mvt: { ...form.mvt, [item.name]: Number(e.target.value) } })} /><em>m/s</em></div></label>)}</div><button className="btn primary" onClick={saveSettings}><Save />保存阈值</button></Card>
+    <Card className="pr-card"><CardHeader title="个人 PR 时间线" subtitle="可为同一个动作记录多次突破与对应日期" action={<button className="btn ghost compact" onClick={addPersonalRecord}><Plus />添加 PR</button>} />
+      <div className="pr-list">{personalRecords.length ? personalRecords.map((record, index) => <div className="pr-row" key={record.id}>
+        <div className="pr-index"><Trophy /><span>PR {index + 1}</span></div>
+        <label><span>动作</span><ExerciseSelect value={record.exercise} onChange={(exercise) => updatePersonalRecord(record.id, { exercise: exercise as ExerciseName })} /></label>
+        <label><span>成绩</span><div className="input-unit"><DecimalInput value={record.weight} onValue={(weight) => updatePersonalRecord(record.id, { weight })} ariaLabel={`${record.exercise} PR 重量`} placeholder="0" /><em>{form.unit}</em></div></label>
+        <label><span>日期</span><input type="date" value={record.date} onChange={(event) => updatePersonalRecord(record.id, { date: event.target.value })} /></label>
+        <label><span>备注（可选）</span><input value={record.notes ?? ""} placeholder="例如：比赛 / 训练" onChange={(event) => updatePersonalRecord(record.id, { notes: event.target.value })} /></label>
+        <button className="remove-pr" onClick={() => removePersonalRecord(record.id)} aria-label={`删除 ${record.exercise} PR`}><Trash2 /></button>
+      </div>) : <EmptyState icon={Trophy} title="还没有 PR 记录" text="点击“添加 PR”，建立属于你的个人最好成绩时间线。" />}</div>
+      {personalRecords.length > 0 && <button className="btn primary" onClick={saveSettings}><Save />保存 PR 记录</button>}
+    </Card>
     <Card><CardHeader title="备份与迁移" subtitle="建议每周导出一次完整 JSON 备份" /><div className="data-actions"><button className="btn primary" onClick={exportJson}><Download />导出完整备份</button><button className="btn ghost" onClick={exportCsv}><Download />导出训练 CSV</button><button className="btn ghost" onClick={() => fileRef.current?.click()}><FileUp />导入 JSON</button><input ref={fileRef} hidden type="file" accept="application/json" onChange={(e) => importJson(e.target.files?.[0])} /></div><div className="local-note">{cloudEnabled ? <Cloud /> : <CloudOff />}<div><strong>{cloudEnabled ? "本地优先 + 云端同步" : "仅本地模式"}</strong><span>{cloudEnabled ? "修改会自动同步，离线时仍可继续记录。" : "配置 Supabase 后启用跨设备同步。"}</span></div></div></Card>
     <Card className="danger-zone"><CardHeader title="危险操作" subtitle="清空后只能通过此前导出的 JSON 恢复" /><button className="btn danger-outline" onClick={clearData}><Trash2 />清空训练与状态数据</button></Card>{status && <div className="toast" role="status">{status}</div>}</div>;
 }
@@ -298,7 +366,8 @@ function defaultSettings(account: string): AthleteSettings {
     bodyWeight: 75,
     unit: "kg",
     theme: "light",
-    mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 }
+    mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 },
+    personalRecords: []
   };
 }
 
@@ -423,3 +492,4 @@ export default function App() {
     {page === "data" && <DataPage settings={settings} onChanged={queueSync} cloudEnabled={cloudConfigured} />}
   </AppShell>;
 }
+

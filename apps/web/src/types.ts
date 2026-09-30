@@ -53,4 +53,14 @@ export interface AthleteSettings {
   unit: "kg" | "lb";
   theme: "light" | "dark" | "system";
   mvt: Record<string, number>;
+  personalRecords?: PersonalRecord[];
 }
+
+export interface PersonalRecord {
+  id: string;
+  exercise: ExerciseName;
+  weight: number;
+  date: string;
+  notes?: string;
+}
+

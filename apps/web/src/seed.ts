@@ -15,7 +15,8 @@ export async function seedDatabase() {
       bodyWeight: 78.5,
       unit: "kg",
       theme: "light",
-      mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 }
+      mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 },
+      personalRecords: []
     };
     await db.settings.add(settings);
   }
@@ -45,3 +46,4 @@ export async function seedDatabase() {
     await db.sessions.bulkAdd(sessions);
   }
 }
+
