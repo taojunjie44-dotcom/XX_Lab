@@ -35,13 +35,15 @@ const uid = () => crypto.randomUUID();
 const trainingTypes: TrainingType[] = ["下肢力量", "上肢力量", "全身力量", "举重技术", "速度力量", "增强式", "体能", "测试", "恢复", "其他"];
 
 function ExerciseSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const groupForValue = exerciseGroups.find((group) => group.exercises.some((exercise) => exercise.name === value)) ?? exerciseGroups[0];
+  const knownGroup = exerciseGroups.find((group) => group.exercises.some((exercise) => exercise.name === value));
+  const availableGroups = knownGroup || !value ? exerciseGroups : [{ category: "历史动作", exercises: [{ name: value }] }, ...exerciseGroups];
+  const groupForValue = knownGroup ?? availableGroups[0];
   const [category, setCategory] = useState(groupForValue.category);
   useEffect(() => setCategory(groupForValue.category), [groupForValue.category]);
-  const group = exerciseGroups.find((item) => item.category === category) ?? exerciseGroups[0];
+  const group = availableGroups.find((item) => item.category === category) ?? groupForValue;
   return <div className="exercise-picker">
-    <select aria-label="动作类别" value={group.category} onChange={(event) => { const next = exerciseGroups.find((item) => item.category === event.target.value) ?? exerciseGroups[0]; setCategory(next.category); onChange(next.exercises[0].name); }}>
-      {exerciseGroups.map((item) => <option key={item.category} value={item.category}>{item.category}</option>)}
+    <select aria-label="动作类别" value={group.category} onChange={(event) => { const next = availableGroups.find((item) => item.category === event.target.value) ?? exerciseGroups[0]; setCategory(next.category); onChange(next.exercises[0].name); }}>
+      {availableGroups.map((item) => <option key={item.category} value={item.category}>{item.category}</option>)}
     </select>
     <select aria-label="训练动作" value={group.exercises.some((exercise) => exercise.name === value) ? value : group.exercises[0].name} onChange={(event) => onChange(event.target.value)}>
       {group.exercises.map((exercise) => <option key={exercise.name} value={exercise.name}>{exercise.name}</option>)}
@@ -239,19 +241,35 @@ function ReadinessPage({ latest, history, onChanged }: { latest?: ReadinessEntry
   </div>;
 }
 
-const blankSet = (): SetEntry => ({ id: uid(), weight: 100, reps: 3, velocity: 0.5, rpe: 7, completed: true });
+const blankSet = (): SetEntry => ({ id: uid(), weight: 0, reps: 0, velocity: 0, rpe: 0, completed: false });
 const blankBlock = (): ExerciseBlock => ({ id: uid(), exercise: "深蹲", sets: [blankSet()] });
+const blankSession = (date = today()): TrainingSession => ({ date, type: "下肢力量", duration: 0, notes: "", exercises: [blankBlock()], completed: false });
+
+function sessionForDate(sessions: TrainingSession[], date: string) {
+  const existing = sessions.filter((item) => item.date === date).sort((a, b) => (b.id ?? 0) - (a.id ?? 0))[0];
+  return existing ? structuredClone(existing) : blankSession(date);
+}
+
+function isUntouchedSession(session: TrainingSession) {
+  const set = session.exercises[0]?.sets[0];
+  return !session.id && session.duration === 0 && !session.notes && session.exercises.length === 1 && session.exercises[0].exercise === "深蹲" && session.exercises[0].sets.length === 1 && Boolean(set) && set.weight === 0 && set.reps === 0 && set.velocity === 0 && set.rpe === 0 && !set.completed;
+}
 
 function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSession[]; settings?: AthleteSettings; onSaved: () => void }) {
-  const [session, setSession] = useState<TrainingSession>({ date: today(), type: "下肢力量", duration: 60, notes: "", exercises: [blankBlock()], completed: false });
+  const [session, setSession] = useState<TrainingSession>(() => sessionForDate(sessions, today()));
   const [message, setMessage] = useState("");
   const isFuture = session.date > today();
+  useEffect(() => {
+    if (!isUntouchedSession(session) || !sessions.some((item) => item.date === session.date)) return;
+    setSession(sessionForDate(sessions, session.date));
+    setMessage(`已同步载入该日期的${session.date > today() ? "训练计划" : "训练记录"}。`);
+  }, [sessions, session]);
   const updateBlock = (blockId: string, fn: (block: ExerciseBlock) => ExerciseBlock) => setSession((s) => ({ ...s, exercises: s.exercises.map((b) => b.id === blockId ? fn(b) : b) }));
   const updateSet = (blockId: string, setId: string, key: keyof SetEntry, value: number | boolean) => updateBlock(blockId, (block) => ({ ...block, sets: block.sets.map((set) => set.id === setId ? { ...set, [key]: value } : set) }));
   const changeDate = (date: string) => {
-    const existing = sessions.find((item) => item.date === date && (!item.completed || date > today()));
-    setSession(existing ? structuredClone(existing) : { date, type: "下肢力量", duration: 60, notes: "", exercises: [blankBlock()], completed: false });
-    setMessage(existing ? "已载入该日期的训练计划。" : "");
+    const existing = sessions.some((item) => item.date === date);
+    setSession(sessionForDate(sessions, date));
+    setMessage(existing ? `已载入该日期的${date > today() ? "训练计划" : "训练记录"}。` : "");
   };
   const save = async () => {
     if (!session.exercises.length || !session.exercises.some((block) => block.sets.length)) { setMessage("请至少添加一个动作和一组计划。"); return; }
@@ -262,6 +280,7 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
       completed: !isFuture,
       exercises: isFuture ? session.exercises.map((block) => ({ ...block, sets: block.sets.map((set) => ({ ...set, completed: false })) })) : session.exercises
     };
+    if (!payload.id) payload.id = sessions.filter((item) => item.date === payload.date).sort((a, b) => (b.id ?? 0) - (a.id ?? 0))[0]?.id;
     if (payload.id) await db.sessions.put(payload); else payload.id = await db.sessions.add(payload);
     setSession(payload);
     setMessage(isFuture ? "训练计划已保存并同步。" : "训练记录已保存并同步。");
@@ -269,7 +288,7 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
   };
   return <div className="session-layout">
     <Card className="session-control"><CardHeader title={isFuture ? "制定训练计划" : "记录本次训练"} subtitle={isFuture ? "未来日期自动保存为计划，到训练日再填写完成状态、速度与时长" : "输入每组最快一次平均向心速度"} action={<span className={`session-mode ${isFuture ? "planned" : "live"}`}>{isFuture ? "未来计划" : "训练记录"}</span>} />
-      <div className="form-grid three"><label><span>日期</span><input type="date" value={session.date} onChange={(e) => changeDate(e.target.value)} /></label><label><span>训练类型</span><select value={session.type} onChange={(e) => setSession({ ...session, type: e.target.value as TrainingSession["type"] })}>{trainingTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>训练时长</span>{isFuture ? <div className="deferred-field">训练结束后填写</div> : <div className="input-unit"><input type="number" min="0" value={session.duration} onChange={(e) => setSession({ ...session, duration: Number(e.target.value) })} /><em>分钟</em></div>}</label></div>
+      <div className="form-grid three"><label><span>日期</span><input type="date" value={session.date} onChange={(e) => changeDate(e.target.value)} /></label><label><span>训练类型</span><select value={session.type} onChange={(e) => setSession({ ...session, type: e.target.value as TrainingSession["type"] })}>{trainingTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label><span>训练时长</span>{isFuture ? <div className="deferred-field">训练结束后填写</div> : <div className="input-unit"><input type="number" min="0" placeholder="训练结束后填写" value={session.duration || ""} onChange={(e) => setSession({ ...session, duration: Number(e.target.value) })} /><em>分钟</em></div>}</label></div>
     </Card>
     {session.exercises.map((block, blockIndex) => {
       const historicalPoints = sessions.filter((item) => item.completed).flatMap((item) => item.exercises.filter((candidate) => candidate.exercise === block.exercise).flatMap((candidate) => candidate.sets.filter((set) => set.completed && set.weight > 0 && set.velocity > 0).map((set) => ({ weight: set.weight, velocity: set.velocity }))));
@@ -281,7 +300,7 @@ function SessionPage({ sessions, settings, onSaved }: { sessions: TrainingSessio
       return <Card className="exercise-card" key={block.id}>
       <div className="exercise-head"><div className="exercise-order">{String(blockIndex + 1).padStart(2,"0")}</div><div><label className="select-label">训练动作<ExerciseSelect value={block.exercise} onChange={(value) => updateBlock(block.id, (candidate) => ({ ...candidate, exercise: value }))} /></label><span>{block.sets.length} 组 · {e1rm ? `历史 ${historicalPoints.length} 点 + 本次 ${currentPoints.length} 点，输入时实时更新` : "至少需要两个不同负荷的有效速度点"}</span></div><div className="exercise-head-actions"><div className={`e1rm-badge ${e1rm ? "ready" : "empty"}`}><Trophy /><strong>{e1rm ? e1rm.toFixed(1) : "—"}</strong><span>今日预计 1RM · kg</span></div><button className="remove-exercise" onClick={() => setSession((current) => ({ ...current, exercises: current.exercises.filter((candidate) => candidate.id !== block.id) }))} aria-label={`删除${block.exercise}`}><Trash2 /></button></div></div>
       <div className="set-table"><div className="set-row set-header"><span>组</span><span>负重</span><span>次数</span><span>速度 m/s</span><span>RPE</span><span>{isFuture ? "计划" : "状态"}</span><span /></div>{block.sets.map((set, index) => <div className="set-row" key={set.id}><strong>{index + 1}</strong><input aria-label={`第${index+1}组负重`} type="number" min="0" value={set.weight || ""} onChange={(e) => updateSet(block.id, set.id, "weight", Number(e.target.value))} /><input aria-label={`第${index+1}组次数`} type="number" min="0" value={set.reps || ""} onChange={(e) => updateSet(block.id, set.id, "reps", Number(e.target.value))} /><DecimalInput ariaLabel={`第${index+1}组速度`} value={set.velocity} placeholder={isFuture ? "可留空" : "0.00"} onValue={(value) => updateSet(block.id, set.id, "velocity", value)} /><DecimalInput ariaLabel={`第${index+1}组RPE`} value={set.rpe} placeholder={isFuture ? "可留空" : "1–10"} max={10} onValue={(value) => updateSet(block.id, set.id, "rpe", value)} />{isFuture ? <span className="planned-set">待训练</span> : <label className="check"><input type="checkbox" checked={set.completed} onChange={(e) => updateSet(block.id, set.id, "completed", e.target.checked)} /><span>完成</span></label>}<button className="icon-button danger" onClick={() => updateBlock(block.id, (candidate) => ({ ...candidate, sets: candidate.sets.filter((item) => item.id !== set.id) }))} aria-label="删除组"><Trash2 /></button></div>)}</div>
-      <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: [...b.sets, { ...blankSet(), weight: b.sets.at(-1)?.weight || 100 }] }))}><Plus />添加一组</button>
+      <button className="btn ghost add-set" onClick={() => updateBlock(block.id, (b) => ({ ...b, sets: [...b.sets, blankSet()] }))}><Plus />添加一组</button>
     </Card>})}
     <button className="add-exercise" onClick={() => setSession((s) => ({ ...s, exercises: [...s.exercises, blankBlock()] }))}><Plus /><span>添加训练动作</span></button>
     <Card className="session-finish"><label><span>{isFuture ? "计划备注" : "训练备注"}</span><textarea placeholder={isFuture ? "记录训练目标、重点技术或负荷安排…" : "记录技术感受、疼痛或计划调整…"} value={session.notes} onChange={(e) => setSession({ ...session, notes: e.target.value })} /></label><div><p className={message.includes("至少") || message.includes("请") ? "error" : "success"}>{message}</p><button className="btn primary" onClick={save}><Save />{isFuture ? "保存训练计划" : "完成并保存训练"}</button></div></Card>
@@ -367,7 +386,7 @@ function defaultSettings(account: string): AthleteSettings {
     bodyWeight: 75,
     unit: "kg",
     theme: "light",
-    mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 },
+    mvt: { 深蹲: 0.3, 杠铃卧推: 0.17, 传统硬拉: 0.15, 全程高抓: 1.7, 全程高翻: 1.3 },
     personalRecords: []
   };
 }

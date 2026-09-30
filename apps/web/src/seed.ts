@@ -15,7 +15,7 @@ export async function seedDatabase() {
       bodyWeight: 78.5,
       unit: "kg",
       theme: "light",
-      mvt: { 深蹲: 0.3, 卧推: 0.17, 硬拉: 0.15, 高抓: 1.7, 高翻: 1.3 },
+      mvt: { 深蹲: 0.3, 杠铃卧推: 0.17, 传统硬拉: 0.15, 全程高抓: 1.7, 全程高翻: 1.3 },
       personalRecords: []
     };
     await db.settings.add(settings);
@@ -38,10 +38,10 @@ export async function seedDatabase() {
     const makeSets = (weights: number[], velocities: number[]) => weights.map((weight, i) => ({ id: crypto.randomUUID(), weight, reps: i < 2 ? 3 : 2, velocity: velocities[i], rpe: 6 + i, completed: true }));
     const sessions: TrainingSession[] = [
       { date: iso(1), type: "下肢力量", duration: 72, notes: "主项速度稳定，最后一组保留。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "深蹲", sets: makeSets([100, 120, 140, 140], [0.61, 0.51, 0.43, 0.39]) }] },
-      { date: iso(3), type: "上肢力量", duration: 64, notes: "卧推完成计划。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "卧推", sets: makeSets([60, 75, 85, 85], [0.71, 0.55, 0.42, 0.38]) }] },
-      { date: iso(5), type: "举重技术", duration: 58, notes: "高抓技术流畅。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "高抓", sets: makeSets([50, 60, 70, 75], [2.43, 2.27, 2.08, 1.96]) }] },
+      { date: iso(3), type: "上肢力量", duration: 64, notes: "卧推完成计划。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "杠铃卧推", sets: makeSets([60, 75, 85, 85], [0.71, 0.55, 0.42, 0.38]) }] },
+      { date: iso(5), type: "举重技术", duration: 58, notes: "高抓技术流畅。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "全程高抓", sets: makeSets([50, 60, 70, 75], [2.43, 2.27, 2.08, 1.96]) }] },
       { date: iso(8), type: "下肢力量", duration: 76, notes: "深蹲基线课。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "深蹲", sets: makeSets([90, 110, 130, 140], [0.68, 0.57, 0.47, 0.42]) }] },
-      { date: iso(11), type: "上肢力量", duration: 62, notes: "卧推稳定。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "卧推", sets: makeSets([55, 70, 80, 90], [0.77, 0.61, 0.49, 0.31]) }] }
+      { date: iso(11), type: "上肢力量", duration: 62, notes: "卧推稳定。", completed: true, exercises: [{ id: crypto.randomUUID(), exercise: "杠铃卧推", sets: makeSets([55, 70, 80, 90], [0.77, 0.61, 0.49, 0.31]) }] }
     ];
     await db.sessions.bulkAdd(sessions);
   }
