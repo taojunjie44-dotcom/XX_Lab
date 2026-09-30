@@ -160,6 +160,7 @@ function Dashboard({ sessions, readiness, settings, go }: { sessions: TrainingSe
       if (!current || set.weight > current.weight || (set.weight === current.weight && session.date > current.date)) best[block.exercise] = { weight: set.weight, velocity: set.velocity > 0 ? set.velocity : undefined, date: session.date, source: "训练记录" };
     })));
     (settings?.personalRecords ?? []).forEach((record) => {
+      if (record.weight <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(record.date)) return;
       const current = best[record.exercise];
       if (!current || record.weight > current.weight || (record.weight === current.weight && record.date > current.date)) best[record.exercise] = { weight: record.weight, date: record.date, source: "手动 PR" };
     });
